@@ -1,0 +1,187 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "cleanup",
+    "version": "0.2.0",
+    "description": "The routes of the cleanup module. Every path is relative to the mount the host assigns."
+  },
+  "paths": {
+    "/rules": {
+      "put": {
+        "operationId": "write-rules",
+        "summary": "Replace the rules",
+        "description": "Checks and keeps the whole list of rules. A rule has to name a folder below the root of a storage. The host takes operate_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": [
+                  "object",
+                  "array"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/plan": {
+      "get": {
+        "operationId": "read-plan",
+        "summary": "What the rules would delete now",
+        "description": "Scans the folders the rules cover and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. The host takes view_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "rule",
+            "in": "query",
+            "required": false,
+            "description": "The id of one rule. Absent answers the counts of every rule.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/usage": {
+      "get": {
+        "operationId": "read-usage",
+        "summary": "How a storage's space is spread",
+        "description": "The size and file count of every top-level entry of one storage, largest first. Kept for ten minutes unless refresh is set. The host takes view_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "storage",
+            "in": "query",
+            "required": true,
+            "description": "The storage to scan.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "refresh",
+            "in": "query",
+            "required": false,
+            "description": "Any value scans again.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
+    "/runs": {
+      "post": {
+        "operationId": "record-run",
+        "summary": "Record a cleanup the page did",
+        "description": "The page deletes with the signed-in person's rights and reports the result here, so the history lists it. The host takes operate_resource on the module's instance before this is called.",
+        "responses": {
+          "201": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": [
+                  "object",
+                  "array"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auto/run": {
+      "post": {
+        "operationId": "run-now",
+        "summary": "Run every enabled rule now",
+        "description": "Runs the rules with the module's API token, as the schedule does. Refused with 409 when no token is set. The host takes operate_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/overview": {
+      "get": {
+        "operationId": "read-overview",
+        "summary": "The rules, the schedule and the last runs",
+        "description": "Every rule, whether the module deletes on its own schedule and when next, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

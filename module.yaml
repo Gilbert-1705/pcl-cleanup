@@ -1,0 +1,65 @@
+# Cleanup for Prusa Connect Local.
+#
+# One module with both halves: the Go process (main.go), which scans the
+# storages and applies the rules, and a page "Aufräumen" under Extensions in
+# the sidebar. User-facing texts are German.
+#
+# Install (see README.md):
+#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.2.0 -from <release> -approve
+
+name: cleanup
+title: Aufräumen
+summary: Löscht alte Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen nach Regeln je Ordner. Zeigt vorher, was weg kann, und wie sich der Speicher verteilt.
+codeowner: Gilbert-1705
+kind: sink
+version: 0.2.0
+license: MIT
+contract_major: 1
+openapi: openapi.json
+platforms:
+  - linux_amd64
+  - linux_arm64
+  - darwin_arm64
+  - darwin_amd64
+
+require:
+  core-storage.list: "*"
+
+# read_storage: scan the storages. Deleting happens from the page with the
+# signed-in person's rights or, automatically, with the API token.
+permissions:
+  - read_storage
+
+needs:
+  # Rules (regeln.json) and history (verlauf.json).
+  data: true
+
+egress:
+  - option: core_url
+    ports: [8080, 80, 443]
+    from: process
+    why: Löscht beim automatischen Lauf über die HTTP-API des eigenen Servers, weil das Modulprotokoll keine Löschung kennt.
+    sends: Die Pfade der zu löschenden Dateien und das API-Token.
+
+options:
+  - key: core_url
+    type: url
+    default: http://127.0.0.1:8080
+    summary: Adresse dieses Servers aus Sicht des Moduls, für den automatischen Lauf.
+  - key: api_token
+    type: secret
+    default: ""
+    summary: API-Zugang mit dem Umfang operate (Einstellungen → API-Zugangsdaten). Ohne ihn löscht nur der Knopf auf der Seite.
+  - key: auto_interval
+    type: duration
+    default: "0s"
+    summary: Wie oft die aktiven Regeln automatisch laufen, z. B. 6h. 0s schaltet das aus. Braucht api_token.
+
+ui:
+  entry: ui/index.js
+  library: ">=0.0.1 <1.0.0"
+  contributes:
+    pages:
+      - path: cleanup
+        title: Aufräumen
+        icon: wrench

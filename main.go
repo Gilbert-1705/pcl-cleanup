@@ -1,0 +1,436 @@
+// Command cleanup keeps the storages of Prusa Connect Local from filling
+// up with camera pictures: snapshots, timelapses and the pictures other
+// extensions leave behind.
+//
+// Rules say which folder of which storage keeps how much. The page shows what
+// each rule would delete and deletes it with the signed-in person's rights.
+// With an API token set, the module also runs the rules on its own schedule.
+package main
+
+import (
+	"context"
+	_ "embed"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/prusa3d/prusa-connect/sdk/extension"
+	"github.com/prusa3d/prusa-connect/sdk/routesapi"
+	"github.com/prusa3d/prusa-connect/sdk/storageapi"
+	"github.com/prusa3d/prusa-connect/sdk/wire"
+	"github.com/prusa3d/prusa-connect/sdk/wirerpc"
+)
+
+const (
+	name    = "cleanup"
+	release = extension.Version("0.2.0")
+)
+
+//go:embed openapi.json
+var openAPI []byte
+
+func main() {
+	if err := run(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s: %v\n", name, err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	line, err := wire.Handshake{
+		Protocol: wire.ProtocolMajor,
+		MinMinor: wire.MinMinor,
+		MaxMinor: wire.MaxMinor,
+		Address:  wire.StdioAddress,
+	}.Line()
+	if err != nil {
+		return err
+	}
+
+	if _, err = os.Stdout.WriteString(line); err != nil {
+		return err
+	}
+
+	m := &module{}
+	methods := wirerpc.Methods{}
+
+	conn, err := wirerpc.NewConn(stdio{}, wirerpc.Options{Role: wirerpc.RoleChild, Methods: methods})
+	if err != nil {
+		return err
+	}
+
+	m.files = storageapi.NewClient(conn)
+
+	methods[wirerpc.MethodInfo] = func(context.Context, wirerpc.Call) (any, error) {
+		return routesapi.Describe(wirerpc.Info{
+			Name: name, Version: release, Contract: wirerpc.Contract,
+			Serves: []wirerpc.Method{wirerpc.MethodConfigure},
+		}, openAPI)
+	}
+	methods[wirerpc.MethodShutdown] = func(context.Context, wirerpc.Call) (any, error) {
+		stop()
+
+		return nil, nil
+	}
+	methods[wirerpc.MethodConfigure] = wirerpc.ConfigureGranted(
+		func(_ context.Context, held Settings, grants wirerpc.Grants) error {
+			if err := held.check(); err != nil {
+				return err
+			}
+
+			if grants.Data == "" {
+				return fmt.Errorf("%w: the module was installed without its data directory; install it with -approve", errSettings)
+			}
+
+			return m.start(ctx, held, grants.Data)
+		})
+	methods[routesapi.MethodServe] = routesapi.Serve(m.routes())
+
+	fmt.Fprintf(os.Stderr, "%s %s is serving on stdio as pid %d\n", name, release, os.Getpid())
+
+	if err = conn.Serve(ctx); err != nil && ctx.Err() == nil {
+		return err
+	}
+
+	m.wg.Wait()
+
+	return nil
+}
+
+type module struct {
+	once sync.Once
+	wg   sync.WaitGroup
+
+	files    lister
+	settings Settings
+	rules    rulesFile
+	history  *history
+
+	mu      sync.Mutex
+	usage   map[string]Usage
+	nextRun time.Time
+	running bool
+}
+
+func (m *module) start(ctx context.Context, settings Settings, dir string) error {
+	var err error
+
+	m.once.Do(func() {
+		m.settings = settings
+		m.rules = rulesFile{path: dataPath(dir, "regeln.json")}
+		m.history = loadHistory(dataPath(dir, "verlauf.json"))
+		m.usage = map[string]Usage{}
+
+		if _, err = m.rules.load(); err != nil {
+			err = fmt.Errorf("regeln.json in the data directory: %w", err)
+
+			return
+		}
+
+		if settings.automatic() {
+			m.wg.Add(1)
+
+			go func() {
+				defer m.wg.Done()
+				m.schedule(ctx)
+			}()
+		} else if settings.interval > 0 {
+			fmt.Fprintf(os.Stderr, "%s: auto_interval is set but api_token is not, so nothing is deleted on its own\n", name)
+		}
+	})
+
+	return err
+}
+
+// schedule runs every enabled rule each auto_interval, starting a few
+// minutes after the module starts, when the server has settled.
+func (m *module) schedule(ctx context.Context) {
+	next := time.Now().Add(5 * time.Minute)
+
+	for {
+		m.mu.Lock()
+		m.nextRun = next
+		m.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Until(next)):
+		}
+
+		m.runAll(ctx, "automatisch")
+
+		next = time.Now().Add(m.settings.interval)
+	}
+}
+
+func (m *module) runAll(ctx context.Context, by string) []RunRecord {
+	m.mu.Lock()
+	if m.running {
+		m.mu.Unlock()
+
+		return nil
+	}
+
+	m.running = true
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.running = false
+		m.mu.Unlock()
+	}()
+
+	rules, err := m.rules.load()
+	if err != nil {
+		record := RunRecord{At: time.Now(), By: by, Rule: "alle", Error: err.Error()}
+		m.history.add(record)
+
+		return []RunRecord{record}
+	}
+
+	d := deleter{base: m.settings.CoreURL, token: m.settings.APIToken, client: &http.Client{Timeout: 2 * time.Minute}}
+
+	var out []RunRecord
+
+	for _, rule := range rules {
+		if !rule.Enabled {
+			continue
+		}
+
+		plan := planRule(ctx, m.files, rule, time.Now())
+		record := RunRecord{At: time.Now(), By: by, Rule: rule.Name}
+
+		switch {
+		case plan.Error != "":
+			record.Error = plan.Error
+		case len(plan.Delete) == 0:
+			continue
+		default:
+			done, err := d.remove(ctx, rule.Storage, plan.Delete)
+			record.Units = done
+			record.Partial = plan.Truncated || done < len(plan.Delete)
+
+			if plan.DeleteUnits > 0 {
+				record.Files = plan.DeleteFiles * done / plan.DeleteUnits
+				record.Freed = plan.DeleteSize * int64(done) / int64(plan.DeleteUnits)
+			}
+
+			if err != nil {
+				record.Error = err.Error()
+			}
+		}
+
+		m.history.add(record)
+		out = append(out, record)
+		fmt.Fprintf(os.Stderr, "%s: %s: %d deleted, %d bytes freed %s\n", name, rule.Name, record.Units, record.Freed, record.Error)
+	}
+
+	m.forgetUsage()
+
+	return out
+}
+
+func (m *module) forgetUsage() {
+	m.mu.Lock()
+	m.usage = map[string]Usage{}
+	m.mu.Unlock()
+}
+
+// State is what the page reads first.
+type State struct {
+	Rules     []Rule      `json:"rules"`
+	Automatic bool        `json:"automatic"`
+	Interval  string      `json:"interval"`
+	NextRun   time.Time   `json:"next_run,omitzero"`
+	Running   bool        `json:"running"`
+	History   []RunRecord `json:"history"`
+	Error     string      `json:"error,omitempty"`
+}
+
+func (m *module) routes() http.Handler {
+	mux := http.NewServeMux()
+
+	// Not /state: the host keeps /api/v1/modules/<namespace>/state for the
+	// module's records and answers it itself.
+	mux.HandleFunc("GET /overview", func(w http.ResponseWriter, _ *http.Request) {
+		if m.history == nil {
+			answer(w, http.StatusServiceUnavailable, map[string]string{"error": "the module is still starting"})
+
+			return
+		}
+
+		rules, err := m.rules.load()
+		state := State{Rules: rules, Automatic: m.settings.automatic(), History: m.history.list()}
+
+		if err != nil {
+			state.Error = err.Error()
+		}
+
+		if m.settings.interval > 0 {
+			state.Interval = m.settings.interval.String()
+		}
+
+		m.mu.Lock()
+		state.NextRun, state.Running = m.nextRun, m.running
+		m.mu.Unlock()
+
+		answer(w, http.StatusOK, state)
+	})
+
+	mux.HandleFunc("PUT /rules", func(w http.ResponseWriter, r *http.Request) {
+		raw, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
+		if err != nil {
+			refuse(w, http.StatusBadRequest, err)
+
+			return
+		}
+
+		var rules []Rule
+		if err = json.Unmarshal(raw, &rules); err != nil {
+			refuse(w, http.StatusBadRequest, fmt.Errorf("the body is not a list of rules: %w", err))
+
+			return
+		}
+
+		if err = checkRules(rules); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
+		}
+
+		if err = m.rules.save(rules); err != nil {
+			refuse(w, http.StatusInternalServerError, err)
+
+			return
+		}
+
+		answer(w, http.StatusOK, rules)
+	})
+
+	mux.HandleFunc("GET /plan", func(w http.ResponseWriter, r *http.Request) {
+		rules, err := m.rules.load()
+		if err != nil {
+			refuse(w, http.StatusInternalServerError, err)
+
+			return
+		}
+
+		only := r.URL.Query().Get("rule")
+		plans := []RulePlan{}
+
+		for _, rule := range rules {
+			if only != "" && rule.ID != only {
+				continue
+			}
+
+			plan := planRule(r.Context(), m.files, rule, time.Now())
+			if only == "" {
+				// The overview carries the counts; the paths come per rule.
+				plan.Delete = nil
+			}
+
+			plans = append(plans, plan)
+		}
+
+		answer(w, http.StatusOK, map[string]any{"plans": plans})
+	})
+
+	mux.HandleFunc("GET /usage", func(w http.ResponseWriter, r *http.Request) {
+		storage := strings.TrimSpace(r.URL.Query().Get("storage"))
+		if storage == "" {
+			refuse(w, http.StatusBadRequest, fmt.Errorf("storage names no storage"))
+
+			return
+		}
+
+		m.mu.Lock()
+		cached, ok := m.usage[storage]
+		m.mu.Unlock()
+
+		if ok && r.URL.Query().Get("refresh") == "" && time.Since(cached.Scanned) < 10*time.Minute {
+			answer(w, http.StatusOK, cached)
+
+			return
+		}
+
+		usage, err := usageOf(r.Context(), m.files, storage, time.Now())
+		if err != nil {
+			refuse(w, http.StatusBadGateway, err)
+
+			return
+		}
+
+		m.mu.Lock()
+		m.usage[storage] = usage
+		m.mu.Unlock()
+
+		answer(w, http.StatusOK, usage)
+	})
+
+	// The page deletes with the person's own rights and reports what it did,
+	// so the history covers both kinds of run.
+	mux.HandleFunc("POST /runs", func(w http.ResponseWriter, r *http.Request) {
+		var record RunRecord
+		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&record); err != nil {
+			refuse(w, http.StatusBadRequest, err)
+
+			return
+		}
+
+		record.At = time.Now()
+		record.By = "von Hand (" + routesapi.PrincipalOf(r) + ")"
+		m.history.add(record)
+		m.forgetUsage()
+
+		answer(w, http.StatusCreated, record)
+	})
+
+	mux.HandleFunc("POST /auto/run", func(w http.ResponseWriter, r *http.Request) {
+		if !m.settings.automatic() {
+			refuse(w, http.StatusConflict, fmt.Errorf("automatic cleanup needs api_token and auto_interval in the settings"))
+
+			return
+		}
+
+		answer(w, http.StatusOK, map[string]any{"runs": m.runAll(r.Context(), "von Hand angestoßen")})
+	})
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+
+	return mux
+}
+
+func answer(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func refuse(w http.ResponseWriter, status int, err error) {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type": "about:blank", "status": status, "code": "cleanup/REFUSED",
+		"title": "the request was refused", "detail": err.Error(), "params": map[string]any{}, "retryable": false,
+	})
+}
+
+type stdio struct{}
+
+func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
+func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
+func (stdio) Close() error                { return os.Stdin.Close() }
