@@ -1,6 +1,6 @@
 {
   "name": "pcl-cleanup-ui",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Browser part of the cleanup extension: a page with rules, storage usage and history.",
   "type": "module",

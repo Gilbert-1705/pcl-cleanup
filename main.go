@@ -38,7 +38,7 @@ import (
 
 const (
 	name    = "cleanup"
-	release = extension.Version("0.4.0")
+	release = extension.Version("0.4.1")
 )
 
 //go:embed openapi.json

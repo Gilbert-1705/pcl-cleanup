@@ -1,0 +1,33 @@
+name: Publish to Plugin Marketplace
+
+# Publishing a GitHub release tagged v<version> (the version in module.yaml)
+# hands the commit to the Prusa Plugin Marketplace builder. It builds every
+# platform and the page bundle itself, and uploads the build together with the
+# commit's source and its build provenance. A person at Prusa reviews it before
+# operators can install it. A pre-release goes to the beta channel.
+#
+# The publish job runs in the environment `release`: only v* tags, and every
+# run waits for the maintainer's approval. The environment holds the signing
+# key, passed by name because `secrets: inherit` does not reach a workflow in
+# another organisation (prusa3d).
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  publish:
+    # prusa3d/prusa-connect-marketplace-publish v1.0.2, pinned to its commit.
+    uses: prusa3d/prusa-connect-marketplace-publish/.github/workflows/publish.yml@56dae34cf597f36239b0fefea87d07de0c91d236 # v1.0.2
+    with:
+      path: .
+      bundle-command: make ui-build
+      core-ref: v0.1.0-beta.1 # Prusa Connect into .core/, as CORE_COMMIT in the Makefile
+    secrets:
+      PRUSA_CONNECT_EXTENSION_SIGNING_KEY: ${{ secrets.PRUSA_CONNECT_EXTENSION_SIGNING_KEY }}
+    permissions:
+      contents: read
+      id-token: write     # lets the run prove which repository, workflow and builder it is
+      attestations: write # the build provenance of the archive and every binary

@@ -2,17 +2,18 @@
 #
 # One module with both halves: the Go process (main.go), which scans the
 # storages and applies the rules, and a page "Aufräumen" under Extensions in
-# the sidebar. User-facing texts are German.
+# the sidebar. The page and the settings are German; title, summary and the
+# egress entry are English for the Plugin Marketplace.
 #
 # Install (see README.md):
-#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.0 -from <release> -approve
+#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.1 -from <release> -approve
 
 name: cleanup
-title: Aufräumen
-summary: Löscht alte Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen nach Regeln je Ordner, auf Wunsch auch alte Druckdateien vom USB-Speicher eines Druckers. Zeigt vorher, was weg kann, und wie sich der Speicher verteilt.
+title: Cleanup
+summary: Deletes old camera snapshots, timelapses and images of other extensions by per-folder rules, and optionally old print files on a printer's USB drive. Shows first what would go and how storage is used.
 codeowner: Gilbert-1705
 kind: sink
-version: 0.4.0
+version: 0.4.1
 license: MIT
 contract_major: 1
 openapi: openapi.json
@@ -22,7 +23,10 @@ platforms:
   - darwin_arm64
   - darwin_amd64
 
+# The Prusa Connect versions this release runs on (the first that reads
+# license), then the capabilities the process calls.
 require:
+  core: ">=0.1.0-beta.1"
   core-storage.list: "*"
   core-access.check: "*"
   core-device.get: "*"
@@ -54,12 +58,24 @@ needs:
   # Rules (regeln.json) and history (verlauf.json).
   data: true
 
+# One connection, and it goes back to this server itself, not to a third party.
+# The module protocol can list storages but cannot delete, so the automatic
+# run for storage rules calls the server's own HTTP API
+# (POST /api/v1/storages/{storage}/deletions) with the API token the operator
+# created for it. core_url defaults to http://127.0.0.1:8080, the address and
+# port a Prusa Connect server listens on unless its config says otherwise
+# (core.api.addr). A server set up on another port, behind a reverse proxy or
+# in a container with host networking (for example :8087) is reached on that
+# port instead, so the port is whatever core_url names; 80 and 443 cover a
+# server behind a proxy. Without api_token and auto_interval the process makes
+# no connection at all. The automatic printer run (printer_auto) needs none:
+# it uses the module protocol (device.files, device.command delete_file).
 egress:
   - option: core_url
     ports: [8080, 80, 443]
     from: process
-    why: Löscht beim automatischen Lauf über die HTTP-API des eigenen Servers, weil das Modulprotokoll keine Löschung kennt. Der Port ist der aus core_url, wenn der Server nicht auf 8080 läuft.
-    sends: Die Pfade der zu löschenden Dateien und das API-Token.
+    why: "Automatic storage cleanup only: deletes through this server's own HTTP API, as the module protocol cannot delete. core_url is this server's address; its port is the server's (8080 by default)."
+    sends: "Paths of files to delete in this server's own storages, and the API token (scope operate) set in api_token. core_url points back at this server, so nothing leaves it unless the operator sets another host."
 
 options:
   - key: core_url

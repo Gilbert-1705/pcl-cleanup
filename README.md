@@ -4,7 +4,7 @@
 
 An extension for [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), the self-hosted Prusa Connect server. Prusa Connect Local never deletes anything on its own: the camera keeps writing snapshots, a timelapse extension writes one folder per print, and other extensions may store pictures too. This extension deletes such files by rules per folder. Before anything is deleted, it shows what would go, how the storage is used, and what was deleted last.
 
-Status: 0.4.0, built and tested against Prusa Connect Local **v0.1.0-beta.1**. The user interface is German (the page is called „Aufräumen“).
+Status: 0.4.1, built and tested against Prusa Connect Local **v0.1.0-beta.1**. The user interface is German (the page is called „Aufräumen“).
 
 Up to 0.1.1 the extension lived in a shared repository with a timelapse extension, under a different module path. Since 0.2.0 it has its own repository. If you run 0.1.x, see [Upgrading from 0.1.x](#upgrading-from-01x).
 
@@ -123,7 +123,7 @@ Limits to be aware of:
 ```sh
 make core
 make release
-prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.0 -from release/cleanup -approve
+prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.1 -from release/cleanup -approve
 ```
 
 Prusa Connect Local recognises an update only by its version, so every change raises it in `module.yaml`, `main.go` (`release`), `openapi.json` and `ui/package.json`. Restart the server once after an update, because it loads the browser part only at start.
@@ -194,6 +194,7 @@ Routes under `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`:
 
 ## Changes
 
+- **0.4.1:** Release through the Prusa Plugin Marketplace: `require.core`, English title and summary, `CHANGELOG.md`, release workflow. No change in behaviour.
 - **0.4.0:** Printer rules keep the newest N (`keep_days: 0`) and by default delete only files with a copy on the server (same name and size). Optional automatic run for printer rules (`printer_auto`, off), with a per-run limit and a dry run that is on by default.
 - **0.3.0:** Printer rules for a printer's own storage (by hand). Rules remember who saved them; saving and every automatic run check that person's own rights. New settings `allowed_storages` and `allowed_devices`. The page reads storages with the signed-in person's rights. The history takes only runs of existing rules.
 - **0.2.0:** Own repository, new module path. In folder mode, a scan cut short at its limit no longer counts unread folders as old. The page deletes in the storage of the plan it read.
