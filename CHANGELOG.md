@@ -7,13 +7,15 @@ and routes as they appear in `module.yaml` and `openapi.json`.
 
 ## 0.4.1 - 2026-11-22
 
-First release through the Prusa Plugin Marketplace. No change in behaviour.
+First release through the Prusa Plugin Marketplace.
 
 ### Changed
 
+- `core_url` has to point at this machine: `127.0.0.1`, `::1` or `localhost`, on any port. Any other host, a user, a query or a scheme other than `http`/`https` is refused when the module is configured, and the module does not start. Before, `core_url` could name any host.
+- The client for `core_url` does not follow redirects, ignores `HTTP_PROXY`/`HTTPS_PROXY` and only connects to loopback addresses. A redirect counts as a failed deletion.
 - `module.yaml` names the Prusa Connect versions it runs on: `require.core` is `>=0.1.0-beta.1`.
 - Title and summary are English (`Cleanup`); the page itself is still called „Aufräumen“.
-- The `egress` entry for `core_url` explains in English that the connection goes back to this server's own HTTP API, and why its port can differ from 8080.
+- The `egress` entry for `core_url` explains in English that the connection goes back to this server's own HTTP API on this machine, on whatever port it listens.
 
 ## 0.4.0 - 2026-11-22
 

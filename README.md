@@ -92,7 +92,7 @@ Under Settings → Extensions → Aufräumen:
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `core_url` | `http://127.0.0.1:8080` | The server's address as the module sees it. Change it if the server listens on another port. |
+| `core_url` | `http://127.0.0.1:8080` | The server's address as the module sees it. Has to be this machine (`127.0.0.1`, `::1` or `localhost`); change the port if the server listens on another one. Other hosts are refused and redirects are not followed. |
 | `api_token` | empty | API credential with the scope `operate` (Settings → API credentials). Stored as a secret. |
 | `auto_interval` | `0s` | How often the active rules run automatically, e.g. `6h`. `0s` turns it off. Storage rules also need `api_token`, printer rules `printer_auto`. |
 | `allowed_storages` | `["local"]` | The storages rules may point at. `"*"` allows all. Anything else is neither saved nor cleaned, and the usage view only shows these. |
@@ -194,7 +194,7 @@ Routes under `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`:
 
 ## Changes
 
-- **0.4.1:** Release through the Prusa Plugin Marketplace: `require.core`, English title and summary, `CHANGELOG.md`, release workflow. No change in behaviour.
+- **0.4.1:** Release through the Prusa Plugin Marketplace: `require.core`, English title and summary, `CHANGELOG.md`, release workflow. `core_url` has to point at this machine (127.0.0.1, ::1, localhost), and its client no longer follows redirects.
 - **0.4.0:** Printer rules keep the newest N (`keep_days: 0`) and by default delete only files with a copy on the server (same name and size). Optional automatic run for printer rules (`printer_auto`, off), with a per-run limit and a dry run that is on by default.
 - **0.3.0:** Printer rules for a printer's own storage (by hand). Rules remember who saved them; saving and every automatic run check that person's own rights. New settings `allowed_storages` and `allowed_devices`. The page reads storages with the signed-in person's rights. The history takes only runs of existing rules.
 - **0.2.0:** Own repository, new module path. In folder mode, a scan cut short at its limit no longer counts unread folders as old. The page deletes in the storage of the plan it read.

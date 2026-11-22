@@ -216,7 +216,7 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 		return []RunRecord{record}
 	}
 
-	d := deleter{base: m.settings.CoreURL, token: m.settings.APIToken, client: &http.Client{Timeout: 2 * time.Minute}}
+	d := deleter{base: m.settings.CoreURL, token: m.settings.APIToken, client: coreClient()}
 
 	var out []RunRecord
 
