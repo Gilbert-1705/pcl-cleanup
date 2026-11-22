@@ -1,0 +1,92 @@
+name: CI
+
+# Checks the Go module and the page on every pull request and push to main.
+# The release bundle itself is built by release-dry-run.yml (marketplace
+# dry run).
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go vet, tests and cross-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-go v7.1.0
+      - name: Set up Go
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Fetch the Prusa Connect Local SDK
+        run: |
+          core_commit="$(sed -n 's/^CORE_COMMIT[[:space:]]*?=[[:space:]]*//p' Makefile)"
+          test -n "$core_commit"
+          git clone -q --depth 1 --branch "$core_commit" https://github.com/prusa3d/prusa-connect.git .core
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test with the race detector
+        run: go test -count=1 -race ./...
+
+      - name: Cross-build the platforms from module.yaml
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          platforms="$(sed -n '/^platforms:/,/^[^ ]/{s/^  - \([a-z0-9]*_[a-z0-9]*\)$/\1/p}' module.yaml)"
+          test -n "$platforms"
+          for platform in $platforms; do
+            GOOS="${platform%_*}" GOARCH="${platform#*_}" go build -trimpath -o /dev/null .
+            echo "built $platform"
+          done
+
+  page:
+    name: Page type check (svelte-check)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # actions/checkout v7.0.1
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      # actions/setup-node v5.0.0, the same pin as the marketplace builder
+      - name: Set up Node
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "22"
+          package-manager-cache: false
+
+      - name: Enable pnpm (version from ui/package.json)
+        run: corepack enable
+
+      - name: Build the Prusa Connect page libraries
+        run: make core
+
+      - name: Install and check the page
+        working-directory: ui
+        env:
+          CI: "true"
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run check
