@@ -20,8 +20,16 @@ import (
 //
 // Target "printer" points the rule at a printer's own storage (a USB drive or
 // its internal disk) instead of one of the server's storages. Such a rule
-// judges print files one by one, only in the folder it names, and only runs
-// by hand: see printer.go.
+// judges print files one by one, only in the folder it names, and runs by
+// hand unless the operator turned on printer_auto: see printer.go and
+// auto_printer.go.
+//
+// A printer rule only deletes a file whose copy lies in one of the server's
+// storages: same long name (case aside) and same size, in CopyStorage under
+// CopyPath (empty: the whole storage). SkipCopyCheck turns that off for a rule
+// run by hand; it is off by default, so a rule saved without the field checks.
+// Files without a copy still count among the newest KeepNewest and are never
+// deleted. See copies.go.
 //
 // SavedBy is the principal who last saved the rule in a changed form. The
 // server sets it, never the page. An automatic run deletes for a rule only
@@ -39,7 +47,11 @@ type Rule struct {
 	Pattern    string `json:"pattern,omitempty"`
 	KeepDays   int    `json:"keep_days"`
 	KeepNewest int    `json:"keep_newest,omitempty"`
-	SavedBy    string `json:"saved_by,omitempty"`
+	// Printer rules only, see above.
+	CopyStorage   string `json:"copy_storage,omitempty"`
+	CopyPath      string `json:"copy_path,omitempty"`
+	SkipCopyCheck bool   `json:"skip_copy_check,omitempty"`
+	SavedBy       string `json:"saved_by,omitempty"`
 }
 
 const (
@@ -49,6 +61,7 @@ const (
 	targetPrinter = "printer"
 	maxRules      = 32
 	maxDeviceID   = 128
+	maxStorageID  = 64
 )
 
 // printFileSuffixes are the only files a printer rule may name. A printer's
@@ -67,6 +80,10 @@ func sameRule(a, b Rule) bool {
 
 // printer reports whether the rule points at a printer's storage.
 func (r Rule) printer() bool { return r.Target == targetPrinter }
+
+// needsCopy reports whether the rule deletes only files with a copy on the
+// server.
+func (r Rule) needsCopy() bool { return r.printer() && !r.SkipCopyCheck }
 
 var errRule = errors.New("the rule is not usable")
 
@@ -99,6 +116,8 @@ func (r *Rule) check() error {
 	r.Device = strings.TrimSpace(r.Device)
 	r.Path = strings.Trim(path.Clean("/"+strings.TrimSpace(r.Path)), "/")
 	r.Pattern = strings.TrimSpace(r.Pattern)
+	r.CopyStorage = strings.TrimSpace(r.CopyStorage)
+	r.CopyPath = strings.Trim(path.Clean("/"+strings.TrimSpace(r.CopyPath)), "/")
 
 	if r.Target == "" {
 		r.Target = targetStorage
@@ -119,6 +138,8 @@ func (r *Rule) check() error {
 		return fmt.Errorf("%w: %s: no storage is named", errRule, r.ID)
 	case r.Device != "":
 		return fmt.Errorf("%w: %s: a storage rule names no printer", errRule, r.ID)
+	case r.CopyStorage != "" || r.CopyPath != "" || r.SkipCopyCheck:
+		return fmt.Errorf("%w: %s: only a printer rule checks for copies", errRule, r.ID)
 	case r.Path == "" || r.Path == ".":
 		return fmt.Errorf("%w: %s: the path is the root of the storage, and a rule has to name a folder", errRule, r.ID)
 	case r.KeepDays < 1 || r.KeepDays > 3650:
@@ -150,7 +171,12 @@ func (r *Rule) check() error {
 // checkPrinter validates a rule on a printer's storage. Its path starts with
 // the storage the printer reported (usb, local), and that storage itself may
 // be the folder, because that is where print files usually lie. What keeps
-// such a rule narrow is the rest: print files only, one folder, by hand.
+// such a rule narrow is the rest: print files only, one folder, by hand
+// unless printer_auto is on (policy.go), and by default only files with a copy
+// on the server; an active one always checks for copies.
+//
+// keep_days may be 0 on a printer, for "keep only the newest N whatever their
+// age", as long as keep_newest keeps at least one.
 func (r *Rule) checkPrinter() error {
 	switch {
 	case r.Device == "" || len(r.Device) > maxDeviceID:
@@ -161,13 +187,22 @@ func (r *Rule) checkPrinter() error {
 		return fmt.Errorf("%w: %s: the path has to start with the printer's storage, such as usb", errRule, r.ID)
 	case r.Mode != modeFiles:
 		return fmt.Errorf("%w: %s: a printer rule judges files one by one, so mode has to be files", errRule, r.ID)
-	case r.Enabled:
-		return fmt.Errorf("%w: %s: a printer rule only runs by hand and cannot be active", errRule, r.ID)
-	case r.KeepDays < 1 || r.KeepDays > 3650:
-		return fmt.Errorf("%w: %s: keep_days has to be 1 to 3650", errRule, r.ID)
+	case r.Enabled && r.SkipCopyCheck:
+		return fmt.Errorf("%w: %s: an active printer rule always checks for copies", errRule, r.ID)
+	case r.KeepDays < 0 || r.KeepDays > 3650:
+		return fmt.Errorf("%w: %s: keep_days has to be 0 to 3650 on a printer", errRule, r.ID)
 	case r.KeepNewest < 0 || r.KeepNewest > 100000:
 		return fmt.Errorf("%w: %s: keep_newest has to be 0 or more", errRule, r.ID)
+	case r.KeepDays == 0 && r.KeepNewest < 1:
+		return fmt.Errorf("%w: %s: with keep_days 0, keep_newest has to keep at least one file", errRule, r.ID)
+	case r.SkipCopyCheck && (r.CopyStorage != "" || r.CopyPath != ""):
+		return fmt.Errorf("%w: %s: a rule without the copy check names no copy storage", errRule, r.ID)
+	case len(r.CopyStorage) > maxStorageID:
+		return fmt.Errorf("%w: %s: copy_storage is longer than %d", errRule, r.ID, maxStorageID)
 	}
+
+	// A missing copy_storage is not refused here, so a printer rule saved by
+	// 0.3.0 still loads. placeAllowed refuses it on save, plan and run.
 
 	r.Depth = 0
 

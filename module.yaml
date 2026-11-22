@@ -5,14 +5,14 @@
 # the sidebar. User-facing texts are German.
 #
 # Install (see README.md):
-#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.3.0 -from <release> -approve
+#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.0 -from <release> -approve
 
 name: cleanup
 title: Aufräumen
 summary: Löscht alte Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen nach Regeln je Ordner, auf Wunsch auch alte Druckdateien vom USB-Speicher eines Druckers. Zeigt vorher, was weg kann, und wie sich der Speicher verteilt.
 codeowner: Gilbert-1705
 kind: sink
-version: 0.3.0
+version: 0.4.0
 license: MIT
 contract_major: 1
 openapi: openapi.json
@@ -28,11 +28,15 @@ require:
   core-device.get: "*"
   core-device.jobs: "*"
   core-device.files: "*"
+  # Only the optional automatic printer run (printer_auto) sends delete_file.
+  core-device.command: "*"
 
 # read_storage: scan the storages for the automatic run. Deleting happens from
 # the page with the signed-in person's rights or, automatically, with the API
-# token. Printers are only read for the person on the page, with their rights,
-# so the module holds no right on any printer.
+# token. By hand, printers are read for the person on the page, with their
+# rights. The module holds no right on any printer unless the operator grants
+# its instance the operator role on one for the automatic printer run
+# (printer_auto, off by default); install does not write that grant.
 permissions:
   - read_storage
 
@@ -69,7 +73,7 @@ options:
   - key: auto_interval
     type: duration
     default: "0s"
-    summary: Wie oft die aktiven Regeln automatisch laufen, z. B. 6h. 0s schaltet das aus. Braucht api_token.
+    summary: Wie oft die aktiven Regeln automatisch laufen, z. B. 6h. 0s schaltet das aus. Speicher-Regeln brauchen dazu api_token, Drucker-Regeln printer_auto.
   - key: allowed_storages
     type: list
     default: '["local"]'
@@ -77,7 +81,19 @@ options:
   - key: allowed_devices
     type: list
     default: "[]"
-    summary: Die Drucker (IDs), auf deren eigenem Speicher Regeln Druckdateien löschen dürfen, nur von Hand. "*" erlaubt alle, leer keinen.
+    summary: Die Drucker (IDs), auf deren eigenem Speicher Regeln Druckdateien löschen dürfen. "*" erlaubt alle, leer keinen.
+  - key: printer_auto
+    type: bool
+    default: "false"
+    summary: Drucker-Regeln dürfen aktiv sein und laufen alle auto_interval, als Erweiterung selbst. Braucht zusätzlich je Drucker die Operator-Rolle für die Instanz (siehe README). Damit könnte die Erweiterung auch Drucke starten; sie sendet aber nur delete_file.
+  - key: printer_auto_max
+    type: int
+    default: "50"
+    summary: Höchstens so viele Dateien löscht ein automatischer Lauf je Drucker-Regel, die ältesten zuerst. 1 bis 500.
+  - key: printer_auto_dry_run
+    type: bool
+    default: "true"
+    summary: Probelauf. Der automatische Drucker-Lauf löscht nichts und schreibt nur in den Verlauf, was er löschen würde.
 
 ui:
   entry: ui/index.js

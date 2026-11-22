@@ -66,6 +66,15 @@ func (s Settings) placeAllowed(rule Rule) error {
 			return fmt.Errorf("%w: the printer %s is not in allowed_devices", errNotAllowed, rule.Device)
 		}
 
+		switch {
+		case !rule.needsCopy():
+			return nil
+		case rule.CopyStorage == "":
+			return fmt.Errorf("%w: the rule names no storage that holds the copies (copy_storage); edit and save it", errNotAllowed)
+		case !allowedIn(s.AllowedStorages, rule.CopyStorage):
+			return fmt.Errorf("%w: the copy storage %s is not in allowed_storages", errNotAllowed, rule.CopyStorage)
+		}
+
 		return nil
 	}
 
@@ -130,6 +139,10 @@ func adopt(ctx context.Context, access checker, settings Settings, person string
 			return nil, fmt.Errorf("%s: %w", rule.Name, err)
 		}
 
+		if rule.printer() && rule.Enabled && !settings.PrinterAuto {
+			return nil, fmt.Errorf("%s: %w: printer rules only run by hand while printer_auto is off", rule.Name, errNotAllowed)
+		}
+
 		if err := mayDelete(ctx, access, person, rule); err != nil {
 			return nil, fmt.Errorf("%s: %w", rule.Name, err)
 		}
@@ -146,8 +159,10 @@ func adopt(ctx context.Context, access checker, settings Settings, person string
 // page at that moment.
 func mayRunAutomatically(ctx context.Context, access checker, settings Settings, rule Rule) error {
 	switch {
-	case rule.printer():
-		return errors.New("printer rules only run by hand")
+	case rule.printer() && !settings.PrinterAuto:
+		return errors.New("printer rules only run by hand while printer_auto is off")
+	case rule.printer() && !rule.needsCopy():
+		return errors.New("an automatic printer rule has to check for copies")
 	case rule.SavedBy == "":
 		return errors.New("nobody has saved this rule since 0.3.0, so it only runs by hand until it is saved once")
 	}

@@ -14,6 +14,12 @@ export interface Rule {
   pattern?: string;
   keep_days: number;
   keep_newest?: number;
+  /** Drucker-Regel: Speicher des Servers mit den Kopien der Druckdateien. */
+  copy_storage?: string;
+  /** Drucker-Regel: Ordner mit den Kopien, leer = ganzer Speicher. */
+  copy_path?: string;
+  /** Drucker-Regel: Kopie-Abgleich aus (nur von Hand). Standard: Abgleich an. */
+  skip_copy_check?: boolean;
   /** Wer die Regel zuletzt geändert gespeichert hat. Setzt nur der Server. */
   saved_by?: string;
 }
@@ -34,6 +40,12 @@ export interface RulePlan {
   delete_files: number;
   delete_size: number;
   delete?: string[];
+  /** Drucker-Regel: Dateien, die nach Alter und Anzahl gingen, aber keine Kopie haben. */
+  kept_no_copy?: number;
+  kept_no_copy_size?: number;
+  kept_no_copy_list?: string[];
+  /** Der Plan löscht nur Dateien mit Kopie auf dem Server. */
+  copy_check?: boolean;
   truncated?: boolean;
   /** Drucker-Regel, die die Übersicht nicht liest. Einzeln anfragen. */
   lazy?: boolean;
@@ -49,6 +61,9 @@ export interface RunRecord {
   freed: number;
   error?: string;
   partial?: boolean;
+  /** Automatischer Drucker-Lauf: jede gelöschte Datei, im Probelauf jede, die gelöscht worden wäre. */
+  deleted?: string[];
+  dry_run?: boolean;
 }
 
 export interface State {
@@ -62,6 +77,12 @@ export interface State {
   skipped?: Record<string, string>;
   allowed_storages: string[] | null;
   allowed_devices: string[] | null;
+  /** Drucker-Regeln dürfen aktiv sein (printer_auto). */
+  printer_auto: boolean;
+  /** … und laufen auch, weil auto_interval gesetzt ist. */
+  printer_automatic: boolean;
+  printer_auto_max: number;
+  printer_auto_dry_run: boolean;
   error?: string;
 }
 
@@ -131,6 +152,16 @@ export const readPlan = async (host: ModuleHost, id: string): Promise<RulePlan |
 
 export const readUsage = (host: ModuleHost, storage: string, refresh: boolean): Promise<Usage> =>
   call(host, 'GET', `/usage?storage=${encodeURIComponent(storage)}${refresh ? '&refresh=1' : ''}`);
+
+export interface Folders {
+  storage: string;
+  path: string;
+  folders: string[];
+  truncated?: boolean;
+}
+
+export const readFolders = (host: ModuleHost, storage: string, path: string): Promise<Folders> =>
+  call(host, 'GET', `/folders?storage=${encodeURIComponent(storage)}&path=${encodeURIComponent(path)}`);
 
 export const recordRun = (host: ModuleHost, record: Omit<RunRecord, 'at' | 'by'>): Promise<RunRecord> =>
   call(host, 'POST', '/runs', record);
