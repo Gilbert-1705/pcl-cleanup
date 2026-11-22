@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -245,9 +246,40 @@ type fakePrinters struct {
 	last     string
 	files    []deviceapi.File
 	read     int
+
+	// as is who each read was made for; deleted the paths delete_file took.
+	// refuse makes the printer refuse a delete; printAfter starts a print
+	// after that many deletes.
+	as         []string
+	deleted    []string
+	refuse     bool
+	printAfter int
+}
+
+func (f *fakePrinters) Command(_ context.Context, p deviceapi.CommandParams) (deviceapi.Result, error) {
+	f.as = append(f.as, "command:"+p.Principal)
+
+	if p.Verb != verbDeleteFile || p.ID != f.device.ID {
+		return deviceapi.Result{}, fmt.Errorf("unexpected command %s on %s", p.Verb, p.ID)
+	}
+
+	if f.refuse {
+		return deviceapi.Result{OK: false, MachineReason: "FILE_HELD"}, nil
+	}
+
+	f.deleted = append(f.deleted, p.Args["path"])
+	f.files = slices.DeleteFunc(f.files, func(file deviceapi.File) bool { return file.Path == p.Args["path"] })
+
+	if f.printAfter > 0 && len(f.deleted) >= f.printAfter {
+		f.printing = true
+	}
+
+	return deviceapi.Result{OK: true}, nil
 }
 
 func (f *fakePrinters) Get(_ context.Context, p deviceapi.GetParams) (deviceapi.Device, error) {
+	f.as = append(f.as, "get:"+p.Principal)
+
 	if p.ID != f.device.ID {
 		return deviceapi.Device{}, deviceapi.ErrNoDevice
 	}
@@ -272,6 +304,7 @@ func (f *fakePrinters) Jobs(_ context.Context, _ deviceapi.JobsParams) (deviceap
 
 func (f *fakePrinters) Files(_ context.Context, p deviceapi.FilesParams) (deviceapi.Listing, error) {
 	f.read++
+	f.as = append(f.as, "files:"+p.Principal)
 
 	if p.Path != "usb" {
 		return deviceapi.Listing{}, deviceapi.ErrInvalidQuery
@@ -311,7 +344,7 @@ func fakePrinterOne() *fakePrinters {
 
 func printerRule() Rule {
 	return Rule{ID: "usb", Name: "USB", Target: targetPrinter, Device: "dev-1", Path: "usb", Mode: modeFiles,
-		Pattern: "*.bgcode", KeepDays: 30, KeepNewest: 5}
+		Pattern: "*.bgcode", KeepDays: 30, KeepNewest: 5, CopyStorage: "local", CopyPath: "drucke"}
 }
 
 func TestAPrinterRuleOffersOnlyOldPrintFiles(t *testing.T) {
@@ -323,7 +356,7 @@ func TestAPrinterRuleOffersOnlyOldPrintFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan := planPrinter(context.Background(), printers, rule, "user:anna", now)
+	plan := planPrinter(context.Background(), printers, copiesOf(printers), rule, "user:anna", now)
 	if plan.Error != "" {
 		t.Fatal(plan.Error)
 	}
@@ -346,7 +379,7 @@ func TestAPrinterRuleReadsNothingWhilePrinting(t *testing.T) {
 	printers := fakePrinterOne()
 	printers.printing = true
 
-	plan := planPrinter(context.Background(), printers, printerRule(), "user:anna", now)
+	plan := planPrinter(context.Background(), printers, copiesOf(printers), printerRule(), "user:anna", now)
 	if !strings.Contains(plan.Error, "printing") || printers.read != 0 || len(plan.Delete) != 0 {
 		t.Fatalf("while printing: %+v, read %d", plan.Error, printers.read)
 	}
@@ -354,11 +387,11 @@ func TestAPrinterRuleReadsNothingWhilePrinting(t *testing.T) {
 	printers.printing = false
 	printers.device.Connected = false
 
-	if plan = planPrinter(context.Background(), printers, printerRule(), "user:anna", now); !strings.Contains(plan.Error, "not connected") {
+	if plan = planPrinter(context.Background(), printers, copiesOf(printers), printerRule(), "user:anna", now); !strings.Contains(plan.Error, "not connected") {
 		t.Fatalf("away: %q", plan.Error)
 	}
 
-	if plan = planPrinter(context.Background(), printers, printerRule(), "", now); plan.Error == "" {
+	if plan = planPrinter(context.Background(), printers, copiesOf(printers), printerRule(), "", now); plan.Error == "" {
 		t.Fatal("a plan without a person read the printer")
 	}
 }
@@ -370,11 +403,15 @@ func TestPrinterRulesAreNarrow(t *testing.T) {
 		"no pattern":        func(r *Rule) { r.Pattern = "" },
 		"wildcard suffix":   func(r *Rule) { r.Pattern = "*.bgcod?" },
 		"folders":           func(r *Rule) { r.Mode = modeFolders; r.Depth = 1 },
-		"automatic":         func(r *Rule) { r.Enabled = true },
+		"active w/o copies": func(r *Rule) { r.Enabled, r.SkipCopyCheck, r.CopyStorage, r.CopyPath = true, true, "", "" },
 		"printer root":      func(r *Rule) { r.Path = "/" },
 		"with a storage":    func(r *Rule) { r.Storage = "local" },
 		"unknown target":    func(r *Rule) { r.Target = "cloud" },
 		"storage w/ device": func(r *Rule) { r.Target = targetStorage; r.Storage = "local"; r.Device = "dev-1" },
+		"keep nothing":      func(r *Rule) { r.KeepDays = 0; r.KeepNewest = 0 },
+		"negative days":     func(r *Rule) { r.KeepDays = -1 },
+		"skip but storage":  func(r *Rule) { r.SkipCopyCheck = true },
+		"storage w/ copies": func(r *Rule) { r.Target = targetStorage; r.Storage = "local"; r.Device = "" },
 	} {
 		rule := printerRule()
 		change(&rule)
@@ -398,6 +435,7 @@ func TestAPrinterRuleNeedsOperateOnThatPrinterAndIsNeverAutomatic(t *testing.T) 
 	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
 	settings := Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}, AllowedDevices: []string{"dev-1"}}
 	m, h := newModule(t, settings, access)
+	m.files = copiesOf(fakePrinterOne())
 
 	body, _ := json.Marshal([]Rule{printerRule()})
 

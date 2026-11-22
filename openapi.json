@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "cleanup",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "The routes of the cleanup module. Every path is relative to the mount the host assigns."
   },
   "paths": {
@@ -43,7 +43,7 @@
       "get": {
         "operationId": "read-plan",
         "summary": "What the rules would delete now",
-        "description": "Scans the folders the rules cover, with the signed-in person's rights, and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. A printer rule is read only when asked for alone (lazy in the overview), never while the printer prints, and never offers the file of the current or the last print. The host takes view_resource on the module's instance before this is called.",
+        "description": "Scans the folders the rules cover, with the signed-in person's rights, and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. A printer rule is read only when asked for alone (lazy in the overview), never while the printer prints, never offers the file of the current or the last print, and by default offers a file only if a copy with the same name and size lies in the rule's copy folder (kept_no_copy counts the others). The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -110,6 +110,46 @@
         ]
       }
     },
+    "/folders": {
+      "get": {
+        "operationId": "read-folders",
+        "summary": "The folders one level below a path",
+        "description": "The folders one level below path in one storage in allowed_storages, listed with the signed-in person's rights, at most 500. The page picks the folder that holds the copies of a printer rule from here. The host takes view_resource on the module's instance before this is called.",
+        "responses": {
+          "200": {
+            "description": "The answer.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true
+                }
+              }
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "storage",
+            "in": "query",
+            "required": true,
+            "description": "The storage to list.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "path",
+            "in": "query",
+            "required": false,
+            "description": "The folder to list; empty for the top of the storage.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
+      }
+    },
     "/runs": {
       "post": {
         "operationId": "record-run",
@@ -147,7 +187,7 @@
       "post": {
         "operationId": "run-now",
         "summary": "Run every enabled rule now",
-        "description": "Runs the storage rules with the module's API token, as the schedule does: each enabled rule only while the person who saved it may still delete there. Refused with 409 when no token is set. The host takes operate_resource on the module's instance before this is called.",
+        "description": "Runs the enabled rules as the schedule does: storage rules with the module's API token, printer rules (only with printer_auto) as the module itself, each rule only while the person who saved it may still delete there. Refused with 409 when neither api_token nor printer_auto with auto_interval is set. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -167,7 +207,7 @@
       "get": {
         "operationId": "read-overview",
         "summary": "The rules, the schedule and the last runs",
-        "description": "Every rule, whether the module deletes on its own schedule and when next, why the last automatic run skipped a rule, the operator's allowed storages and printers, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
+        "description": "Every rule, whether the module deletes on its own schedule and when next, why the last automatic run skipped a rule, the operator's allowed storages and printers, the settings of the automatic printer run, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/prusa3d/prusa-connect/sdk/storageapi"
@@ -118,6 +119,23 @@ type unit struct {
 	Size   int64     `json:"size"`
 	Files  int       `json:"files"`
 	Newest time.Time `json:"newest"`
+	// Name is the long name of a file on a printer, matched against copies.
+	Name string `json:"-"`
+	// NoCopy is a file on a printer without a copy on the server: it counts
+	// among the newest but is never deleted.
+	NoCopy bool `json:"-"`
+}
+
+// sortUnits puts units in plan order: newest first, and by path where two are
+// equally new, so the order never depends on how the storage listed them.
+func sortUnits(units []unit) {
+	slices.SortFunc(units, func(a, b unit) int {
+		if c := b.Newest.Compare(a.Newest); c != 0 {
+			return c
+		}
+
+		return strings.Compare(a.Path, b.Path)
+	})
 }
 
 // RulePlan is what one rule would delete right now.
@@ -137,11 +155,23 @@ type RulePlan struct {
 	DeleteFiles int       `json:"delete_files"`
 	DeleteSize  int64     `json:"delete_size"`
 	Delete      []string  `json:"delete"`
-	Truncated   bool      `json:"truncated,omitempty"`
+	// KeptNoCopy are printer files the limits would delete but that have no
+	// copy on the server, so they stay. Names lists their long names.
+	KeptNoCopy     int      `json:"kept_no_copy,omitempty"`
+	KeptNoCopySize int64    `json:"kept_no_copy_size,omitempty"`
+	KeptNoCopyList []string `json:"kept_no_copy_list,omitempty"`
+	// CopyCheck says the plan deletes only files with a copy on the server.
+	CopyCheck bool `json:"copy_check,omitempty"`
+	Truncated bool `json:"truncated,omitempty"`
 	// Lazy is a printer rule the overview does not scan, because reading a
 	// printer is slow and occupies it. The page asks for that rule alone.
 	Lazy  bool   `json:"lazy,omitempty"`
 	Error string `json:"error,omitempty"`
+
+	// deleteSizes and deleteNames go with Delete, for the history of an
+	// automatic printer run.
+	deleteSizes []int64
+	deleteNames []string
 }
 
 // planRule scans the place a rule covers and lists what it would delete, for

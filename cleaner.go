@@ -26,15 +26,32 @@ const historyLength = 30
 // AllowedStorages and AllowedDevices are the operator's outer limit: rules may
 // only point at the storages and printers they name, "*" naming all. See
 // policy.go.
+//
+// PrinterAuto lets printer rules run on the schedule too (auto_printer.go).
+// PrinterAutoMax bounds the files one such run deletes per rule, and
+// PrinterAutoDryRun, on unless set to false, has the run only write down what
+// it would delete. Both are pointers so that a missing value, as after an
+// update that did not ask for the new options, takes the safe default.
 type Settings struct {
-	CoreURL         string   `json:"core_url"`
-	APIToken        string   `json:"api_token"`
-	AutoInterval    string   `json:"auto_interval"`
-	AllowedStorages []string `json:"allowed_storages"`
-	AllowedDevices  []string `json:"allowed_devices"`
+	CoreURL           string   `json:"core_url"`
+	APIToken          string   `json:"api_token"`
+	AutoInterval      string   `json:"auto_interval"`
+	AllowedStorages   []string `json:"allowed_storages"`
+	AllowedDevices    []string `json:"allowed_devices"`
+	PrinterAuto       bool     `json:"printer_auto"`
+	PrinterAutoMax    *int     `json:"printer_auto_max"`
+	PrinterAutoDryRun *bool    `json:"printer_auto_dry_run"`
 
-	interval time.Duration
+	interval   time.Duration
+	printerMax int
+	dryRun     bool
 }
+
+// Bounds of printer_auto_max.
+const (
+	defaultPrinterMax = 50
+	highestPrinterMax = 500
+)
 
 var errSettings = errors.New("the cleanup settings are not usable")
 
@@ -62,6 +79,17 @@ func (s *Settings) check() error {
 		return err2
 	}
 
+	s.printerMax = defaultPrinterMax
+	if s.PrinterAutoMax != nil {
+		s.printerMax = *s.PrinterAutoMax
+	}
+
+	if s.printerMax < 1 || s.printerMax > highestPrinterMax {
+		return fmt.Errorf("%w: printer_auto_max is %d and has to be 1 to %d", errSettings, s.printerMax, highestPrinterMax)
+	}
+
+	s.dryRun = s.PrinterAutoDryRun == nil || *s.PrinterAutoDryRun
+
 	return nil
 }
 
@@ -82,10 +110,21 @@ func cleanList(key string, list []string, longest int) ([]string, error) {
 	return out, nil
 }
 
-// automatic reports whether the module deletes on its own schedule.
+// automatic reports whether storage rules run on the schedule: they delete
+// through the HTTP API with the token.
 func (s Settings) automatic() bool {
 	return s.interval > 0 && s.APIToken != "" && s.CoreURL != ""
 }
+
+// printerAutomatic reports whether printer rules run on the schedule. They
+// need no token: they read and delete through the module protocol, as the
+// module itself, which the operator has to make an operator of each printer.
+func (s Settings) printerAutomatic() bool {
+	return s.interval > 0 && s.PrinterAuto
+}
+
+// scheduled reports whether anything runs on the schedule.
+func (s Settings) scheduled() bool { return s.automatic() || s.printerAutomatic() }
 
 // RunRecord is one cleanup, by hand or on the schedule.
 type RunRecord struct {
@@ -97,6 +136,10 @@ type RunRecord struct {
 	Freed   int64     `json:"freed"`
 	Error   string    `json:"error,omitempty"`
 	Partial bool      `json:"partial,omitempty"`
+	// Deleted names each file an automatic printer run deleted, or would
+	// have deleted in a dry run.
+	Deleted []string `json:"deleted,omitempty"`
+	DryRun  bool     `json:"dry_run,omitempty"`
 }
 
 // Bounds on a run the page reports.
@@ -119,6 +162,9 @@ func (r *RunRecord) clean() error {
 	case r.Units < 0 || r.Files < 0 || r.Freed < 0:
 		return errors.New("units, files and freed cannot be negative")
 	}
+
+	// Only the module writes the files of an automatic run.
+	r.Deleted, r.DryRun = nil, false
 
 	if len(r.Error) > maxRecordError {
 		r.Error = strings.ToValidUTF8(r.Error[:maxRecordError], "") + " …"

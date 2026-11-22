@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"path"
-	"slices"
 	"strings"
 	"time"
 
@@ -15,16 +14,19 @@ import (
 // A printer rule cleans print files off a printer's own storage, a USB drive
 // or its internal disk. It differs from a storage rule on purpose:
 //
-//   - It lists the printer for the person on the page, with their rights, and
-//     never as the module itself. The module holds no right on any printer.
+//   - By hand, it lists the printer for the person on the page, with their
+//     rights. Only the automatic run (auto_printer.go, off by default) reads
+//     it as the module itself, which then needs the operator role on that
+//     printer from the operator.
 //   - It reads only the folder it names, not the folders below: a printer on
 //     Buddy firmware answers one command at a time and takes 12 to 15 seconds
 //     to list a folder of about 300 files.
 //   - It reads nothing while the printer prints, and it never offers the
 //     file of the current or the last print.
 //   - A file whose date the printer did not report (0) is never offered.
-//   - The page deletes the files one by one with the person's rights. There is
-//     no automatic run for printers.
+//   - By default it deletes only files whose copy lies in one of the server's
+//     storages (copies.go). Files without one still count among the newest.
+//   - The page deletes the files one by one with the person's rights.
 
 // devices is the part of the device client a printer plan needs, so a test
 // can stand in a fake.
@@ -32,28 +34,53 @@ type devices interface {
 	Get(ctx context.Context, params deviceapi.GetParams) (deviceapi.Device, error)
 	Jobs(ctx context.Context, params deviceapi.JobsParams) (deviceapi.Jobs, error)
 	Files(ctx context.Context, params deviceapi.FilesParams) (deviceapi.Listing, error)
+	Command(ctx context.Context, params deviceapi.CommandParams) (deviceapi.Result, error)
 }
 
 // errPrinting is a printer that is busy with a print.
 var errPrinting = errors.New("the printer is printing; nothing is read or deleted until the print has ended")
 
 // planPrinter lists what a printer rule would delete right now, read for
-// person.
-func planPrinter(ctx context.Context, printers devices, rule Rule, person string, now time.Time) RulePlan {
-	plan := RulePlan{
-		RuleID: rule.ID, Name: rule.Name, Target: targetPrinter, Device: rule.Device, Path: rule.Path,
-		Enabled: false, Delete: []string{},
-	}
-
+// the person on the page. A request without a person reads nothing.
+func planPrinter(ctx context.Context, printers devices, files lister, rule Rule, person string, now time.Time) RulePlan {
 	if strings.TrimSpace(person) == "" {
+		plan := emptyPrinterPlan(rule)
 		plan.Error = errNobody.Error()
 
 		return plan
 	}
 
+	return printerPlan(ctx, printers, files, rule, person, now)
+}
+
+func emptyPrinterPlan(rule Rule) RulePlan {
+	return RulePlan{
+		RuleID: rule.ID, Name: rule.Name, Target: targetPrinter, Device: rule.Device, Path: rule.Path,
+		Enabled: rule.Enabled, Delete: []string{}, CopyCheck: rule.needsCopy(),
+	}
+}
+
+// printerPlan reads the printer and the copies for principal: a person, or
+// the module itself when empty (only the automatic run).
+func printerPlan(ctx context.Context, printers devices, files lister, rule Rule, person string, now time.Time) RulePlan {
+	plan := emptyPrinterPlan(rule)
+
 	units, err := printerFiles(ctx, printers, rule, person)
 	if err != nil {
 		plan.Error = err.Error()
+
+		return plan
+	}
+
+	sortUnits(units)
+
+	if err = markCopies(ctx, files, rule, person, units, now); err != nil {
+		// Without the copies, the plan still shows what lies on the printer, but
+		// deletes nothing.
+		fillPlan(&plan, units, rule, now)
+		plan.Error = err.Error()
+		plan.Delete, plan.deleteSizes, plan.deleteNames = []string{}, nil, nil
+		plan.DeleteUnits, plan.DeleteFiles, plan.DeleteSize = 0, 0, 0
 
 		return plan
 	}
@@ -114,7 +141,7 @@ func printerFiles(ctx context.Context, printers devices, rule Rule, person strin
 				continue
 			}
 
-			units = append(units, unit{Path: f.Path, Size: f.Size, Files: 1, Newest: time.Unix(f.Modified, 0)})
+			units = append(units, unit{Path: f.Path, Name: name, Size: f.Size, Files: 1, Newest: time.Unix(f.Modified, 0)})
 		}
 
 		offset += len(page.Items)
@@ -160,9 +187,10 @@ func printerName(device deviceapi.Device) string {
 }
 
 // fillPlan counts units into a plan: newest first, keep_newest protects the
-// head of the list whatever its age, everything older than keep_days goes.
+// head of the list whatever its age, everything older than keep_days goes,
+// except a printer file without a copy on the server, which stays.
 func fillPlan(plan *RulePlan, units []unit, rule Rule, now time.Time) {
-	slices.SortFunc(units, func(a, b unit) int { return b.Newest.Compare(a.Newest) })
+	sortUnits(units)
 
 	cutoff := rule.cutoff(now)
 
@@ -179,12 +207,25 @@ func fillPlan(plan *RulePlan, units []unit, rule Rule, now time.Time) {
 			continue
 		}
 
+		if u.NoCopy {
+			plan.KeptNoCopy++
+			plan.KeptNoCopySize += u.Size
+
+			if len(plan.KeptNoCopyList) < maxPlanPaths {
+				plan.KeptNoCopyList = append(plan.KeptNoCopyList, u.Name)
+			}
+
+			continue
+		}
+
 		plan.DeleteUnits++
 		plan.DeleteFiles += u.Files
 		plan.DeleteSize += u.Size
 
 		if len(plan.Delete) < maxPlanPaths {
 			plan.Delete = append(plan.Delete, u.Path)
+			plan.deleteSizes = append(plan.deleteSizes, u.Size)
+			plan.deleteNames = append(plan.deleteNames, u.Name)
 		} else {
 			plan.Truncated = true
 		}

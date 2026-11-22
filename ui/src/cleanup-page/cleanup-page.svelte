@@ -14,6 +14,8 @@
     bytes,
     deletePaths,
     deletePrinterFiles,
+    type Folders,
+    readFolders,
     readPlan,
     readPlans,
     readState,
@@ -48,6 +50,10 @@
   let usageStorage = $state('');
   let usage = $state<Usage | undefined>(undefined);
   let usageBusy = $state(false);
+
+  // Ordnerauswahl für die Kopien einer Drucker-Regel.
+  let picker = $state<Folders | undefined>(undefined);
+  let pickerBusy = $state(false);
 
   const load = async (): Promise<void> => {
     try {
@@ -204,7 +210,41 @@
     }
   };
 
+  const openFolder = async (path: string): Promise<void> => {
+    if (!editing?.copy_storage) return;
+    pickerBusy = true;
+    try {
+      picker = await readFolders(host, editing.copy_storage, path);
+    } catch (error) {
+      problem = `Die Ordner konnten nicht gelesen werden: ${String(error)}`;
+    } finally {
+      pickerBusy = false;
+    }
+  };
+
+  const parentOf = (path: string): string => path.split('/').slice(0, -1).join('/');
+
+  const takeFolder = (path: string): void => {
+    if (editing) editing = { ...editing, copy_path: path };
+    picker = undefined;
+  };
+
+  // Kopie-Abgleich ein- oder ausschalten. Aus heißt: keine Angaben zum Kopie-Speicher.
+  const chooseCopyCheck = (on: boolean): void => {
+    if (!editing) return;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { copy_storage, copy_path, skip_copy_check, ...rest } = editing;
+    // Ohne Kopie-Abgleich läuft eine Drucker-Regel nie automatisch.
+    editing = on
+      ? { ...rest, copy_storage: copy_storage || defaultCopyStorage(), copy_path: copy_path ?? '' }
+      : { ...rest, skip_copy_check: true, enabled: false };
+    picker = undefined;
+  };
+
+  const defaultCopyStorage = (): string => (storages.includes('local') ? 'local' : (storages[0] ?? ''));
+
   const startEdit = (index: number): void => {
+    picker = undefined;
     editingIndex = index;
     editing =
       index >= 0 && current
@@ -224,11 +264,13 @@
   };
 
   // Beim Wechsel auf den Drucker-Speicher die Vorgaben, die eine Drucker-Regel
-  // braucht: nur Druckdateien, einzeln, nur von Hand.
+  // braucht: nur Druckdateien, einzeln, nur von Hand, nur mit Kopie auf dem
+  // Server. Vorgabe: die neuesten 10 behalten, ohne Altersgrenze.
   const chooseTarget = (target: 'storage' | 'printer'): void => {
     if (!editing) return;
+    picker = undefined;
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    const { storage, device, ...rest } = editing;
+    const { storage, device, copy_storage, copy_path, skip_copy_check, ...rest } = editing;
     editing =
       target === 'printer'
         ? {
@@ -239,9 +281,19 @@
             mode: 'files',
             pattern: '*.bgcode',
             enabled: false,
-            keep_days: 90,
+            keep_days: 0,
+            keep_newest: 10,
+            copy_storage: defaultCopyStorage(),
+            copy_path: '',
           }
-        : { ...rest, target, storage: storages[0] ?? 'local', path: '', pattern: '*.jpg' };
+        : {
+            ...rest,
+            target,
+            storage: storages[0] ?? 'local',
+            path: '',
+            pattern: '*.jpg',
+            keep_days: Math.max(1, Number(rest.keep_days)),
+          };
   };
 
   const saveRules = async (rules: Rule[]): Promise<boolean> => {
@@ -268,11 +320,15 @@
     };
     // saved_by setzt der Server, nie die Seite.
     delete rule.saved_by;
+    if (!rule.skip_copy_check) delete rule.skip_copy_check;
     const rules = [...current.rules];
     if (editingIndex >= 0) rules[editingIndex] = rule;
     else rules.push(rule);
 
-    if (await saveRules(rules)) editing = undefined;
+    if (await saveRules(rules)) {
+      editing = undefined;
+      picker = undefined;
+    }
   };
 
   const removeRule = async (index: number): Promise<void> => {
@@ -287,8 +343,16 @@
   };
 
   const describeKeep = (rule: Rule): string => {
-    let text = `älter als ${rule.keep_days} Tage`;
-    if (rule.keep_newest) text += `, die neuesten ${rule.keep_newest} bleiben immer`;
+    let text =
+      rule.keep_days === 0
+        ? `alles außer den neuesten ${rule.keep_newest ?? 0}`
+        : `älter als ${rule.keep_days} Tage`;
+    if (rule.keep_days !== 0 && rule.keep_newest) text += `, die neuesten ${rule.keep_newest} bleiben immer`;
+    if (rule.target === 'printer') {
+      text += rule.skip_copy_check
+        ? ', ohne Kopie-Abgleich'
+        : `, nur mit Kopie in ${rule.copy_storage ?? '?'}:${rule.copy_path || '(ganzer Speicher)'}`;
+    }
 
     return text;
   };
@@ -346,8 +410,11 @@
             <li class="flex flex-col gap-2 border-b border-border pb-3">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-medium">{rule.name}</span>
-                {#if rule.target === 'printer'}
+                {#if rule.target === 'printer' && !rule.enabled}
                   <Badge variant="secondary">nur von Hand</Badge>
+                {:else if rule.target === 'printer'}
+                  <Badge variant="success">aktiv</Badge>
+                  {#if current.printer_auto_dry_run}<Badge variant="warning">Probelauf</Badge>{/if}
                 {:else}
                   <Badge variant={rule.enabled ? 'success' : 'secondary'}>
                     {rule.enabled ? 'aktiv' : 'aus'}
@@ -356,6 +423,11 @@
                 <span class="text-xs text-muted-foreground">{describeWhere(rule)}: {describeWhat(rule)}</span>
               </div>
               <p class="text-sm text-muted-foreground">Löschen: {describeKeep(rule)}</p>
+              {#if rule.target === 'printer' && rule.enabled && !current.printer_auto}
+                <p class="text-sm text-warning-text">
+                  Aktiv, aber printer_auto ist in den Einstellungen aus. Läuft nur von Hand.
+                </p>
+              {/if}
               {#if current.automatic && rule.enabled && rule.target !== 'printer' && !rule.saved_by}
                 <p class="text-sm text-muted-foreground">
                   Läuft erst automatisch, wenn jemand mit Löschrecht die Regel einmal speichert.
@@ -381,6 +453,26 @@
                   </strong>
                   {#if plan.truncated}· nur ein Teil durchsucht{/if}
                 </p>
+                {#if rule.target === 'printer'}
+                  <ul class="text-sm text-muted-foreground">
+                    <li>Behalten, die neuesten: {Math.min(rule.keep_newest ?? 0, plan.units)}</li>
+                    {#if plan.copy_check}
+                      <li>
+                        Behalten, keine Kopie in Connect Local: {plan.kept_no_copy ?? 0}
+                        {#if plan.kept_no_copy}({bytes(plan.kept_no_copy_size ?? 0)}){/if}
+                      </li>
+                    {/if}
+                    <li>Löschen: {plan.delete_units}</li>
+                  </ul>
+                  {#if plan.kept_no_copy_list?.length}
+                    <details class="text-sm">
+                      <summary class="cursor-pointer text-muted-foreground">Ohne Kopie, bleiben liegen</summary>
+                      <ul class="mt-1 max-h-48 overflow-auto">
+                        {#each plan.kept_no_copy_list as name (name)}<li>{name}</li>{/each}
+                      </ul>
+                    </details>
+                  {/if}
+                {/if}
               {:else if scanning}
                 <p class="text-sm text-muted-foreground">Durchsuche …</p>
               {/if}
@@ -399,7 +491,7 @@
                 {/if}
                 <ConfirmDialog
                   title={`${rule.name} aufräumen?`}
-                  description={`${plan?.delete_units ?? 'Alle'} ${unitWord(rule)} ${describeKeep(rule)} unter ${describeWhere(rule)}:${rule.path} werden endgültig gelöscht${plan ? ` (${bytes(plan.delete_size)})` : ''}.${rule.target === 'printer' ? ' Vorher wird der Drucker noch einmal gelesen.' : ''}`}
+                  description={`${plan?.delete_units ?? 'Alle'} ${unitWord(rule)} ${describeKeep(rule)} unter ${describeWhere(rule)}:${rule.path} werden endgültig gelöscht${plan ? ` (${bytes(plan.delete_size)})` : ''}.${rule.target === 'printer' ? ` Vorher wird der Drucker noch einmal gelesen${rule.skip_copy_check ? '' : ' und jede Datei mit den Kopien auf dem Server abgeglichen'}.` : ''}`}
                   confirmLabel="Löschen"
                   variant="destructive"
                   onConfirm={() => void clean(rule)}
@@ -417,7 +509,7 @@
                     </Button>
                   {/snippet}
                 </ConfirmDialog>
-                {#if rule.target !== 'printer'}
+                {#if rule.target !== 'printer' || rule.enabled || (current.printer_auto && !rule.skip_copy_check)}
                   <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
                     {rule.enabled ? 'Ausschalten' : 'Einschalten'}
                   </Button>
@@ -481,9 +573,88 @@
                 Nur Druckdateien wie
                 <input class={field} bind:value={editing.pattern} required placeholder="*.bgcode" />
               </label>
+              <label class="flex items-center gap-2 text-sm @md:col-span-2">
+                <input
+                  type="checkbox"
+                  checked={!editing.skip_copy_check}
+                  onchange={(event) => chooseCopyCheck(event.currentTarget.checked)}
+                />
+                Nur löschen, was mit gleichem Namen und gleicher Größe auch in Connect Local liegt (empfohlen)
+              </label>
+              {#if !editing.skip_copy_check}
+                <label class="flex flex-col gap-1 text-sm">
+                  Kopien liegen im Speicher
+                  <select
+                    class={field}
+                    bind:value={editing.copy_storage}
+                    onchange={() => {
+                      if (editing) editing = { ...editing, copy_path: '' };
+                      picker = undefined;
+                    }}
+                    required
+                  >
+                    {#each storages.length ? storages : [editing.copy_storage ?? ''] as name (name)}
+                      <option value={name}>{name}</option>
+                    {/each}
+                  </select>
+                </label>
+                <div class="flex flex-col gap-1 text-sm">
+                  <span>Ordner mit den Kopien (mit Unterordnern)</span>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <code class="rounded-sm bg-muted px-2 py-1">{editing.copy_path || '(ganzer Speicher)'}</code>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      pending={pickerBusy}
+                      onclick={() => void openFolder(editing?.copy_path ?? '')}
+                    >
+                      Ordner wählen
+                    </Button>
+                  </div>
+                </div>
+                {#if picker}
+                  <div class="flex flex-col gap-1 rounded-sm border border-border p-2 text-sm @md:col-span-2">
+                    <div class="flex flex-wrap items-center gap-2">
+                      <span class="text-muted-foreground">{picker.storage}:</span>
+                      <code>{picker.path || '/'}</code>
+                      <Button size="sm" onclick={() => takeFolder(picker?.path ?? '')}>Diesen Ordner nehmen</Button>
+                      {#if picker.path}
+                        <Button variant="ghost" size="sm" onclick={() => void openFolder(parentOf(picker?.path ?? ''))}>
+                          Eine Ebene hoch
+                        </Button>
+                      {/if}
+                      <Button variant="ghost" size="sm" onclick={() => (picker = undefined)}>Schließen</Button>
+                    </div>
+                    {#if picker.folders.length === 0}
+                      <p class="text-muted-foreground">Keine Unterordner.</p>
+                    {:else}
+                      <ul class="max-h-48 overflow-auto">
+                        {#each picker.folders as folder (folder)}
+                          <li>
+                            <button type="button" class="text-left underline" onclick={() => void openFolder(folder)}>
+                              {folder.split('/').at(-1)}/
+                            </button>
+                          </li>
+                        {/each}
+                      </ul>
+                    {/if}
+                    {#if picker.truncated}<p class="text-muted-foreground">Nur die ersten 500 Ordner.</p>{/if}
+                  </div>
+                {/if}
+              {/if}
+              {#if current.printer_auto}
+                <label class="flex items-center gap-2 text-sm @md:col-span-2">
+                  <input type="checkbox" bind:checked={editing.enabled} disabled={Boolean(editing.skip_copy_check)} />
+                  aktiv (automatisch alle {current.interval || '…'}, höchstens {current.printer_auto_max} Dateien je
+                  Lauf{current.printer_auto_dry_run ? ', zurzeit nur Probelauf' : ''})
+                </label>
+              {/if}
               <p class="text-sm text-muted-foreground @md:col-span-2">
-                Nur von Hand, nie während eines Drucks, nie die Datei des laufenden oder letzten Drucks und
-                nie Dateien ohne Datum. Gelöscht wird mit deinen Rechten am Drucker.
+                Nie während eines Drucks, nie die Datei des laufenden oder letzten Drucks und nie Dateien
+                ohne Datum. Dateien ohne Kopie zählen zu den neuesten, werden aber nie gelöscht. Von Hand
+                wird mit deinen Rechten am Drucker gelöscht{current.printer_auto
+                  ? ', automatisch als Erweiterung, solange du den Drucker selbst bedienen darfst'
+                  : ''}.
               </p>
             {:else}
               <label class="flex flex-col gap-1 text-sm">
@@ -520,8 +691,15 @@
               </label>
             {/if}
             <label class="flex flex-col gap-1 text-sm">
-              Behalten (Tage)
-              <input class={field} type="number" min="1" max="3650" bind:value={editing.keep_days} required />
+              {editing.target === 'printer' ? 'Behalten (Tage, 0 = nur nach Anzahl)' : 'Behalten (Tage)'}
+              <input
+                class={field}
+                type="number"
+                min={editing.target === 'printer' ? 0 : 1}
+                max="3650"
+                bind:value={editing.keep_days}
+                required
+              />
             </label>
             <label class="flex flex-col gap-1 text-sm">
               Die neuesten immer behalten (Anzahl)
@@ -552,11 +730,16 @@
       <CardTitle>Automatisch</CardTitle>
     </CardHeader>
     <CardContent>
-      {#if current?.automatic}
+      {#if current?.automatic || current?.printer_automatic}
         <p class="text-sm">
-          Alle {current.interval} werden die aktiven Regeln für Server-Speicher ausgeführt, jede nur,
-          solange die Person, die sie gespeichert hat, dort selbst löschen darf. Drucker-Regeln laufen
-          nur von Hand.
+          Alle {current.interval} werden die aktiven Regeln ausgeführt, jede nur, solange die Person,
+          die sie gespeichert hat, dort selbst löschen darf.
+          {current.automatic
+            ? 'Server-Speicher: an.'
+            : 'Server-Speicher: aus, dafür fehlt das api_token.'}
+          {current.printer_automatic
+            ? `Drucker: an, höchstens ${current.printer_auto_max} Dateien je Regel und Lauf, nur mit Kopie in Connect Local${current.printer_auto_dry_run ? ', zurzeit nur als Probelauf (es wird nichts gelöscht, nur im Verlauf notiert)' : ''}.`
+            : 'Drucker: nur von Hand.'}
           {#if when(current.next_run)}Nächster Lauf: {when(current.next_run)}.{/if}
         </p>
         <div class="mt-2">
@@ -633,9 +816,24 @@
           {#each current.history as run, i (i)}
             <li class="text-sm">
               <span class="text-muted-foreground">{when(run.at)}</span>
-              · {run.rule} · {run.units} gelöscht · {bytes(run.freed)} frei · {run.by}
+              · {run.rule} ·
+              {run.dry_run
+                ? `${run.units} würden gelöscht · ${bytes(run.freed)} würden frei`
+                : `${run.units} gelöscht · ${bytes(run.freed)} frei`}
+              · {run.by}
+              {#if run.dry_run}<Badge variant="secondary">Probelauf</Badge>{/if}
               {#if run.partial}<Badge variant="warning">unvollständig</Badge>{/if}
               {#if run.error}<span class="text-destructive-text"> · {run.error}</span>{/if}
+              {#if run.deleted?.length}
+                <details>
+                  <summary class="cursor-pointer text-muted-foreground">
+                    {run.dry_run ? 'Wäre gelöscht worden' : 'Gelöscht'}: {run.deleted.length} Dateien
+                  </summary>
+                  <ul class="mt-1 max-h-48 overflow-auto">
+                    {#each run.deleted as file, j (j)}<li>{file}</li>{/each}
+                  </ul>
+                </details>
+              {/if}
             </li>
           {/each}
         </ul>
