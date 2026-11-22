@@ -62,11 +62,9 @@ func (s *Settings) check() error {
 	}
 
 	s.interval = every
-	s.CoreURL = strings.TrimRight(s.CoreURL, "/")
-
 	if s.CoreURL != "" {
-		if u, err := url.Parse(s.CoreURL); err != nil || u.Host == "" {
-			return fmt.Errorf("%w: core_url is not an address", errSettings)
+		if s.CoreURL, err = checkCoreURL(s.CoreURL); err != nil {
+			return err
 		}
 	}
 

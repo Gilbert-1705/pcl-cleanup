@@ -4,7 +4,7 @@
 
 Eine Erweiterung für [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), den selbst gehosteten Prusa-Connect-Server. Prusa Connect Local löscht von sich aus nichts: Die Kamera legt laufend Snapshots ab, eine Zeitraffer-Erweiterung schreibt pro Druck einen Ordner, und andere Erweiterungen legen eventuell Bilder ab. Diese Erweiterung löscht so etwas nach Regeln je Ordner. Vorher zeigt sie, was weg kann, wie sich der Speicher verteilt und was zuletzt gelöscht wurde.
 
-Stand: 0.4.0, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.1**. Die Oberfläche ist deutsch, die Seite heißt „Aufräumen“.
+Stand: 0.4.1, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.1**. Die Oberfläche ist deutsch, die Seite heißt „Aufräumen“.
 
 Bis 0.1.1 lag die Erweiterung zusammen mit einer Zeitraffer-Erweiterung in einem gemeinsamen Repository, unter einem anderen Modulpfad. Seit 0.2.0 hat sie ein eigenes Repository. Wer 0.1.x nutzt, findet den [Umstieg von 0.1.x](#umstieg-von-01x) weiter unten.
 
@@ -92,7 +92,7 @@ Unter Settings → Extensions → Aufräumen:
 
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
-| `core_url` | `http://127.0.0.1:8080` | Adresse des Servers aus Sicht des Moduls. Läuft der Server auf einem anderen Port, hier anpassen. |
+| `core_url` | `http://127.0.0.1:8080` | Adresse des Servers aus Sicht des Moduls. Muss dieser Rechner sein (`127.0.0.1`, `::1` oder `localhost`); läuft der Server auf einem anderen Port, den Port anpassen. Andere Hosts werden abgelehnt, Weiterleitungen nicht befolgt. |
 | `api_token` | leer | API-Zugang mit Umfang `operate` (Einstellungen → API-Zugangsdaten). Wird als Secret gespeichert. |
 | `auto_interval` | `0s` | Wie oft die aktiven Regeln automatisch laufen, z. B. `6h`. `0s` schaltet das aus. Speicher-Regeln brauchen dazu `api_token`, Drucker-Regeln `printer_auto`. |
 | `allowed_storages` | `["local"]` | Die Speicher, auf die Regeln zeigen dürfen. `"*"` erlaubt alle. Alles andere wird weder gespeichert noch aufgeräumt, und die Belegung zeigt nur diese. |
@@ -123,7 +123,7 @@ Grenzen, die man kennen sollte:
 ```sh
 make core
 make release
-prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.0 -from release/cleanup -approve
+prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.1 -from release/cleanup -approve
 ```
 
 Ein Update erkennt Prusa Connect Local nur an der Version. Jede Änderung hebt sie deshalb in `module.yaml`, `main.go` (`release`), `openapi.json` und `ui/package.json` an. Nach einem Update den Server einmal neu starten, weil er den Browser-Teil nur beim Start lädt.
@@ -182,6 +182,7 @@ Die Routen liegen unter `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup
 
 ## Änderungen
 
+- **0.4.1:** Veröffentlichung über den Prusa Plugin Marketplace: `require.core`, englischer Titel und Kurztext, `CHANGELOG.md`, Release-Workflow. `core_url` muss auf diesen Rechner zeigen (127.0.0.1, ::1, localhost), und der Client folgt keinen Weiterleitungen mehr.
 - **0.4.0:** Drucker-Regeln behalten die neuesten N (`keep_days: 0`) und löschen ab Werk nur Dateien mit Kopie auf dem Server (gleicher Name und gleiche Größe). Optionaler automatischer Lauf für Drucker-Regeln (`printer_auto`, aus), mit Obergrenze je Lauf und einem Probelauf, der ab Werk an ist.
 - **0.3.0:** Drucker-Regeln für den eigenen Speicher eines Druckers (von Hand). Regeln merken sich, wer sie gespeichert hat; Speichern und jeder automatische Lauf prüfen die eigenen Rechte dieser Person. Neue Einstellungen `allowed_storages` und `allowed_devices`. Die Seite liest Speicher mit den Rechten der angemeldeten Person. Der Verlauf nimmt nur Läufe vorhandener Regeln an.
 - **0.2.0:** Eigenes Repository, neuer Modulpfad. Im Ordner-Modus zählt ein an seiner Grenze abgeschnittener Scan nicht gelesene Ordner nicht mehr als alt. Die Seite löscht im Speicher des Plans, den sie gelesen hat.
