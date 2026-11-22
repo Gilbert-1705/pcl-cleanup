@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "cleanup",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "The routes of the cleanup module. Every path is relative to the mount the host assigns."
   },
   "paths": {
@@ -10,7 +10,7 @@
       "put": {
         "operationId": "write-rules",
         "summary": "Replace the rules",
-        "description": "Checks and keeps the whole list of rules. A rule has to name a folder below the root of a storage. The host takes operate_resource on the module's instance before this is called.",
+        "description": "Checks and keeps the whole list of rules. A storage rule names a folder below the root of a storage in allowed_storages. A printer rule names a printer in allowed_devices, a folder on its storage and a pattern for print files, and only runs by hand. Every new or changed rule is checked against the signed-in person's own rights (write_storage on storages, operate on the printer) and remembers that person; an unchanged rule keeps its author. Refused with 403 when the person may not delete there and with 422 when the rule is outside the operator's lists. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -43,7 +43,7 @@
       "get": {
         "operationId": "read-plan",
         "summary": "What the rules would delete now",
-        "description": "Scans the folders the rules cover and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. The host takes view_resource on the module's instance before this is called.",
+        "description": "Scans the folders the rules cover, with the signed-in person's rights, and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. A printer rule is read only when asked for alone (lazy in the overview), never while the printer prints, and never offers the file of the current or the last print. The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -74,7 +74,7 @@
       "get": {
         "operationId": "read-usage",
         "summary": "How a storage's space is spread",
-        "description": "The size and file count of every top-level entry of one storage, largest first. Kept for ten minutes unless refresh is set. The host takes view_resource on the module's instance before this is called.",
+        "description": "The size and file count of every top-level entry of one storage in allowed_storages, largest first, listed with the signed-in person's rights. Kept for ten minutes per person unless refresh is set. The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -114,7 +114,7 @@
       "post": {
         "operationId": "record-run",
         "summary": "Record a cleanup the page did",
-        "description": "The page deletes with the signed-in person's rights and reports the result here, so the history lists it. The host takes operate_resource on the module's instance before this is called.",
+        "description": "The page deletes with the signed-in person's rights and reports the result here, so the history lists it. Refused with 422 for a rule that does not exist, negative counts or a rule name longer than 80. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "201": {
             "description": "The answer.",
@@ -147,7 +147,7 @@
       "post": {
         "operationId": "run-now",
         "summary": "Run every enabled rule now",
-        "description": "Runs the rules with the module's API token, as the schedule does. Refused with 409 when no token is set. The host takes operate_resource on the module's instance before this is called.",
+        "description": "Runs the storage rules with the module's API token, as the schedule does: each enabled rule only while the person who saved it may still delete there. Refused with 409 when no token is set. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -167,7 +167,7 @@
       "get": {
         "operationId": "read-overview",
         "summary": "The rules, the schedule and the last runs",
-        "description": "Every rule, whether the module deletes on its own schedule and when next, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
+        "description": "Every rule, whether the module deletes on its own schedule and when next, why the last automatic run skipped a rule, the operator's allowed storages and printers, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",

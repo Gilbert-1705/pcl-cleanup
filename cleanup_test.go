@@ -111,7 +111,7 @@ func TestFilesOlderThanTheLimitAndMatchingThePatternAreDeleted(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan := planRule(context.Background(), storageWith(), rule, now)
+	plan := planRule(context.Background(), storageWith(), rule, "", now)
 
 	if plan.Error != "" {
 		t.Fatal(plan.Error)
@@ -136,7 +136,7 @@ func TestFoldersGoAsAWholeAndTheNewestAreKept(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	plan := planRule(context.Background(), storageWith(), rule, now)
+	plan := planRule(context.Background(), storageWith(), rule, "", now)
 
 	want := []string{"zeitraffer/core-one/2026-01-05_c", "zeitraffer/core-one/2025-12-01_d"}
 	if !slices.Equal(plan.Delete, want) || plan.DeleteFiles != 4 || plan.Units != 4 {
@@ -149,7 +149,7 @@ func TestAMissingFolderIsAnEmptyPlan(t *testing.T) {
 		Mode: modeFiles, KeepDays: 7}
 	_ = rule.check()
 
-	plan := planRule(context.Background(), storageWith(), rule, now)
+	plan := planRule(context.Background(), storageWith(), rule, "", now)
 	if plan.Error != "" || plan.Units != 0 {
 		t.Fatalf("%+v", plan)
 	}
@@ -176,7 +176,7 @@ func TestTheDefaultsAreValid(t *testing.T) {
 }
 
 func TestUsageAddsUpEachTopLevelFolder(t *testing.T) {
-	usage, err := usageOf(context.Background(), storageWith(), "local", now)
+	usage, err := usageOf(context.Background(), storageWith(), "local", "", now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,40 +222,35 @@ func TestTheDeleterSendsBatchesWithTheToken(t *testing.T) {
 }
 
 func TestTheRoutesServeStatePlanAndRules(t *testing.T) {
-	m := &module{files: storageWith()}
-	if err := m.start(context.Background(), Settings{AutoInterval: "0s"}, t.TempDir()); err != nil {
+	access := &fakeAccess{allow: map[string]bool{"user:anna write_storage resource_kind/storage": true}}
+	m := &module{files: storageWith(), access: access}
+
+	if err := m.start(context.Background(), Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}}, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 
 	h := m.routes()
 
-	call := func(method, target, body string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(method, target, strings.NewReader(body)))
-
-		return rec
-	}
-
-	if rec := call("GET", "/overview", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "kamera-snapshots") {
+	if rec := call(t, h, "user:anna", "GET", "/overview", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "kamera-snapshots") {
 		t.Fatalf("state: %d %s", rec.Code, rec.Body)
 	}
 
-	if rec := call("PUT", "/rules", `[{"id":"a","name":"A","storage":"local","path":"","mode":"files","keep_days":3}]`); rec.Code != 422 {
+	if rec := call(t, h, "user:anna", "PUT", "/rules", `[{"id":"a","name":"A","storage":"local","path":"","mode":"files","keep_days":3}]`); rec.Code != 422 {
 		t.Fatalf("a rule on the root was answered %d", rec.Code)
 	}
 
-	if rec := call("PUT", "/rules", `[{"id":"a","name":"A","enabled":true,"storage":"local","path":"camera","mode":"files","keep_days":3}]`); rec.Code != 200 {
+	if rec := call(t, h, "user:anna", "PUT", "/rules", `[{"id":"a","name":"A","enabled":true,"storage":"local","path":"camera","mode":"files","keep_days":3}]`); rec.Code != 200 {
 		t.Fatalf("rules: %d %s", rec.Code, rec.Body)
 	}
 
-	rec := call("GET", "/plan?rule=a", "")
+	rec := call(t, h, "user:anna", "GET", "/plan?rule=a", "")
 
 	var plans struct{ Plans []RulePlan }
 	if err := json.Unmarshal(rec.Body.Bytes(), &plans); err != nil || len(plans.Plans) != 1 || plans.Plans[0].DeleteUnits < 27 {
 		t.Fatalf("plan: %s", rec.Body)
 	}
 
-	if rec = call("POST", "/auto/run", ""); rec.Code != http.StatusConflict {
+	if rec = call(t, h, "user:anna", "POST", "/auto/run", ""); rec.Code != http.StatusConflict {
 		t.Fatalf("a run without a token was answered %d", rec.Code)
 	}
 }

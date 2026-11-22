@@ -32,12 +32,15 @@ type entry struct {
 	MTime time.Time
 }
 
-// walker lists folders and counts what it read.
+// walker lists folders and counts what it read. Principal is the person the
+// listing is for, and empty for the module's own work: with a person, the
+// server lists with that person's rights.
 type walker struct {
-	files   lister
-	storage string
-	walked  int
-	cut     bool
+	files     lister
+	storage   string
+	principal string
+	walked    int
+	cut       bool
 }
 
 func (w *walker) list(ctx context.Context, dir string) ([]entry, error) {
@@ -46,7 +49,7 @@ func (w *walker) list(ctx context.Context, dir string) ([]entry, error) {
 	cursor := ""
 
 	for {
-		page, err := w.files.List(ctx, storageapi.ListParams{Storage: w.storage, Path: dir, Cursor: cursor})
+		page, err := w.files.List(ctx, storageapi.ListParams{Principal: w.principal, Storage: w.storage, Path: dir, Cursor: cursor})
 		if err != nil {
 			return out, err
 		}
@@ -121,7 +124,9 @@ type unit struct {
 type RulePlan struct {
 	RuleID      string    `json:"rule_id"`
 	Name        string    `json:"name"`
-	Storage     string    `json:"storage"`
+	Target      string    `json:"target"`
+	Storage     string    `json:"storage,omitempty"`
+	Device      string    `json:"device,omitempty"`
 	Path        string    `json:"path"`
 	Enabled     bool      `json:"enabled"`
 	Units       int       `json:"units"`
@@ -133,17 +138,21 @@ type RulePlan struct {
 	DeleteSize  int64     `json:"delete_size"`
 	Delete      []string  `json:"delete"`
 	Truncated   bool      `json:"truncated,omitempty"`
-	Error       string    `json:"error,omitempty"`
+	// Lazy is a printer rule the overview does not scan, because reading a
+	// printer is slow and occupies it. The page asks for that rule alone.
+	Lazy  bool   `json:"lazy,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
-// planRule scans the place a rule covers and lists what it would delete.
-func planRule(ctx context.Context, files lister, rule Rule, now time.Time) RulePlan {
+// planRule scans the place a rule covers and lists what it would delete, for
+// the module itself (principal empty) or for a person.
+func planRule(ctx context.Context, files lister, rule Rule, principal string, now time.Time) RulePlan {
 	plan := RulePlan{
-		RuleID: rule.ID, Name: rule.Name, Storage: rule.Storage, Path: rule.Path, Enabled: rule.Enabled,
-		Delete: []string{},
+		RuleID: rule.ID, Name: rule.Name, Target: targetStorage, Storage: rule.Storage, Path: rule.Path,
+		Enabled: rule.Enabled, Delete: []string{},
 	}
 
-	w := &walker{files: files, storage: rule.Storage}
+	w := &walker{files: files, storage: rule.Storage, principal: principal}
 
 	units, err := collect(ctx, w, rule)
 	if err != nil && !errors.Is(err, storageapi.ErrNoFile) {
@@ -152,34 +161,7 @@ func planRule(ctx context.Context, files lister, rule Rule, now time.Time) RuleP
 		return plan
 	}
 
-	// Newest first: keep_newest protects the head of the list whatever its age.
-	slices.SortFunc(units, func(a, b unit) int { return b.Newest.Compare(a.Newest) })
-
-	cutoff := rule.cutoff(now)
-
-	for i, u := range units {
-		plan.Units++
-		plan.Files += u.Files
-		plan.Size += u.Size
-
-		if plan.Oldest.IsZero() || u.Newest.Before(plan.Oldest) {
-			plan.Oldest = u.Newest
-		}
-
-		if i < rule.KeepNewest || !u.Newest.Before(cutoff) {
-			continue
-		}
-
-		plan.DeleteUnits++
-		plan.DeleteFiles += u.Files
-		plan.DeleteSize += u.Size
-
-		if len(plan.Delete) < maxPlanPaths {
-			plan.Delete = append(plan.Delete, u.Path)
-		} else {
-			plan.Truncated = true
-		}
-	}
+	fillPlan(&plan, units, rule, now)
 
 	plan.Truncated = plan.Truncated || w.cut
 
@@ -288,8 +270,8 @@ type Usage struct {
 	Truncated bool        `json:"truncated,omitempty"`
 }
 
-func usageOf(ctx context.Context, files lister, storage string, now time.Time) (Usage, error) {
-	w := &walker{files: files, storage: storage}
+func usageOf(ctx context.Context, files lister, storage, principal string, now time.Time) (Usage, error) {
+	w := &walker{files: files, storage: storage, principal: principal}
 
 	top, err := w.list(ctx, "")
 	if err != nil {

@@ -53,7 +53,7 @@ func TestCutWalkNeverDeletesRecentFolders(t *testing.T) {
 	if err := rule.check(); err != nil {
 		t.Fatal(err)
 	}
-	plan := planRule(context.Background(), files, rule, now)
+	plan := planRule(context.Background(), files, rule, "", now)
 	t.Logf("units=%d delete_units=%d truncated=%v", plan.Units, plan.DeleteUnits, plan.Truncated)
 	if plan.DeleteUnits != 0 || len(plan.Delete) != 0 {
 		t.Fatalf("every run is an hour old, yet the plan deletes %d of them (first %v)", plan.DeleteUnits, plan.Delete[:min(3, len(plan.Delete))])
@@ -67,7 +67,7 @@ func TestOldFoldersStillGoWithoutCut(t *testing.T) {
 	if err := rule.check(); err != nil {
 		t.Fatal(err)
 	}
-	plan := planRule(context.Background(), files, rule, now)
+	plan := planRule(context.Background(), files, rule, "", now)
 	if plan.Truncated || plan.Units != 30 || plan.DeleteUnits != 20 {
 		t.Fatalf("units=%d delete=%d truncated=%v, want 30, 20 (keep_newest 10), false", plan.Units, plan.DeleteUnits, plan.Truncated)
 	}
@@ -80,7 +80,7 @@ func TestCutWalkKeepsOldFoldersReadInFull(t *testing.T) {
 	if err := rule.check(); err != nil {
 		t.Fatal(err)
 	}
-	plan := planRule(context.Background(), files, rule, now)
+	plan := planRule(context.Background(), files, rule, "", now)
 	t.Logf("units=%d delete_units=%d truncated=%v", plan.Units, plan.DeleteUnits, plan.Truncated)
 	if !plan.Truncated || plan.Units == 0 || plan.Units >= 700 || plan.DeleteUnits != plan.Units-10 {
 		t.Fatalf("units=%d delete=%d truncated=%v", plan.Units, plan.DeleteUnits, plan.Truncated)

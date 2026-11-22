@@ -4,19 +4,26 @@ export interface Rule {
   id: string;
   name: string;
   enabled: boolean;
-  storage: string;
+  /** 'storage' (Standard) oder 'printer' für den eigenen Speicher eines Druckers. */
+  target?: 'storage' | 'printer';
+  storage?: string;
+  device?: string;
   path: string;
   mode: 'files' | 'folders';
   depth?: number;
   pattern?: string;
   keep_days: number;
   keep_newest?: number;
+  /** Wer die Regel zuletzt geändert gespeichert hat. Setzt nur der Server. */
+  saved_by?: string;
 }
 
 export interface RulePlan {
   rule_id: string;
   name: string;
-  storage: string;
+  target: 'storage' | 'printer';
+  storage?: string;
+  device?: string;
   path: string;
   enabled: boolean;
   units: number;
@@ -28,6 +35,8 @@ export interface RulePlan {
   delete_size: number;
   delete?: string[];
   truncated?: boolean;
+  /** Drucker-Regel, die die Übersicht nicht liest. Einzeln anfragen. */
+  lazy?: boolean;
   error?: string;
 }
 
@@ -49,6 +58,10 @@ export interface State {
   next_run?: string;
   running: boolean;
   history: RunRecord[];
+  /** Warum der letzte automatische Lauf eine Regel ausgelassen hat, je Regel-ID. */
+  skipped?: Record<string, string>;
+  allowed_storages: string[] | null;
+  allowed_devices: string[] | null;
   error?: string;
 }
 
@@ -142,6 +155,32 @@ export const deletePaths = async (
 
   return done;
 };
+
+/**
+ * Löscht Druckdateien vom Speicher eines Druckers, eine nach der anderen und mit
+ * den Rechten der angemeldeten Person. Der Drucker beantwortet einen Befehl nach
+ * dem anderen, deshalb nicht parallel.
+ */
+export const deletePrinterFiles = async (
+  host: ModuleHost,
+  device: string,
+  paths: string[],
+  progress: (done: number) => void,
+): Promise<number> => {
+  let done = 0;
+
+  for (const path of paths) {
+    await host.client.deleteDeviceFile({ path: { device_id: device }, query: { path } });
+    done += 1;
+    progress(done);
+  }
+
+  return done;
+};
+
+/** Ob eine Liste aus den Einstellungen einen Namen zulässt. „*“ lässt alles zu. */
+export const allowed = (list: string[] | null | undefined, name: string): boolean =>
+  (list ?? []).includes('*') || (list ?? []).includes(name);
 
 export const bytes = (n: number): string => {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
