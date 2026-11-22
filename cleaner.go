@@ -22,10 +22,16 @@ const deleteBatch = 200
 const historyLength = 30
 
 // Settings is the module's configuration.
+//
+// AllowedStorages and AllowedDevices are the operator's outer limit: rules may
+// only point at the storages and printers they name, "*" naming all. See
+// policy.go.
 type Settings struct {
-	CoreURL      string `json:"core_url"`
-	APIToken     string `json:"api_token"`
-	AutoInterval string `json:"auto_interval"`
+	CoreURL         string   `json:"core_url"`
+	APIToken        string   `json:"api_token"`
+	AutoInterval    string   `json:"auto_interval"`
+	AllowedStorages []string `json:"allowed_storages"`
+	AllowedDevices  []string `json:"allowed_devices"`
 
 	interval time.Duration
 }
@@ -47,7 +53,33 @@ func (s *Settings) check() error {
 		}
 	}
 
+	var err2 error
+	if s.AllowedStorages, err2 = cleanList("allowed_storages", s.AllowedStorages, 64); err2 != nil {
+		return err2
+	}
+
+	if s.AllowedDevices, err2 = cleanList("allowed_devices", s.AllowedDevices, maxDeviceID); err2 != nil {
+		return err2
+	}
+
 	return nil
+}
+
+// cleanList trims the entries of a list setting and refuses empty or overlong
+// ones.
+func cleanList(key string, list []string, longest int) ([]string, error) {
+	out := make([]string, 0, len(list))
+
+	for _, entry := range list {
+		entry = strings.TrimSpace(entry)
+		if entry == "" || len(entry) > longest {
+			return nil, fmt.Errorf("%w: %s holds an empty entry or one longer than %d", errSettings, key, longest)
+		}
+
+		out = append(out, entry)
+	}
+
+	return out, nil
 }
 
 // automatic reports whether the module deletes on its own schedule.
@@ -65,6 +97,34 @@ type RunRecord struct {
 	Freed   int64     `json:"freed"`
 	Error   string    `json:"error,omitempty"`
 	Partial bool      `json:"partial,omitempty"`
+}
+
+// Bounds on a run the page reports.
+const (
+	maxRecordRule  = 80
+	maxRecordError = 500
+)
+
+// clean holds a run the page reports to the bounds the page itself can
+// produce, so the history shows what happened and nothing longer. The page
+// reports what it did with the person's own rights; the server checked those
+// when it deleted.
+func (r *RunRecord) clean() error {
+	r.Rule = strings.TrimSpace(r.Rule)
+	r.Error = strings.TrimSpace(r.Error)
+
+	switch {
+	case r.Rule == "" || len(r.Rule) > maxRecordRule:
+		return errors.New("rule is empty or longer than 80")
+	case r.Units < 0 || r.Files < 0 || r.Freed < 0:
+		return errors.New("units, files and freed cannot be negative")
+	}
+
+	if len(r.Error) > maxRecordError {
+		r.Error = strings.ToValidUTF8(r.Error[:maxRecordError], "") + " …"
+	}
+
+	return nil
 }
 
 type history struct {

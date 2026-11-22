@@ -4,23 +4,29 @@
 //
 // Rules say which folder of which storage keeps how much. The page shows what
 // each rule would delete and deletes it with the signed-in person's rights.
-// With an API token set, the module also runs the rules on its own schedule.
+// With an API token set, the module also runs the rules on its own schedule,
+// for each rule only while the person who saved it may still delete there
+// (policy.go). Rules on a printer's own storage run by hand only (printer.go).
 package main
 
 import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/prusa3d/prusa-connect/sdk/accessapi"
+	"github.com/prusa3d/prusa-connect/sdk/deviceapi"
 	"github.com/prusa3d/prusa-connect/sdk/extension"
 	"github.com/prusa3d/prusa-connect/sdk/routesapi"
 	"github.com/prusa3d/prusa-connect/sdk/storageapi"
@@ -30,7 +36,7 @@ import (
 
 const (
 	name    = "cleanup"
-	release = extension.Version("0.2.0")
+	release = extension.Version("0.3.0")
 )
 
 //go:embed openapi.json
@@ -70,6 +76,8 @@ func run() error {
 	}
 
 	m.files = storageapi.NewClient(conn)
+	m.printers = deviceapi.NewClient(conn)
+	m.access = accessapi.NewClient(conn)
 
 	methods[wirerpc.MethodInfo] = func(context.Context, wirerpc.Call) (any, error) {
 		return routesapi.Describe(wirerpc.Info{
@@ -112,6 +120,8 @@ type module struct {
 	wg   sync.WaitGroup
 
 	files    lister
+	printers devices
+	access   checker
 	settings Settings
 	rules    rulesFile
 	history  *history
@@ -120,6 +130,8 @@ type module struct {
 	usage   map[string]Usage
 	nextRun time.Time
 	running bool
+	// skipped is why the last automatic run left a rule out, by rule id.
+	skipped map[string]string
 }
 
 func (m *module) start(ctx context.Context, settings Settings, dir string) error {
@@ -130,6 +142,7 @@ func (m *module) start(ctx context.Context, settings Settings, dir string) error
 		m.rules = rulesFile{path: dataPath(dir, "regeln.json")}
 		m.history = loadHistory(dataPath(dir, "verlauf.json"))
 		m.usage = map[string]Usage{}
+		m.skipped = map[string]string{}
 
 		if _, err = m.rules.load(); err != nil {
 			err = fmt.Errorf("regeln.json in the data directory: %w", err)
@@ -203,12 +216,21 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 
 	var out []RunRecord
 
+	skipped := map[string]string{}
+
 	for _, rule := range rules {
-		if !rule.Enabled {
+		if !rule.Enabled || rule.printer() {
 			continue
 		}
 
-		plan := planRule(ctx, m.files, rule, time.Now())
+		if err := mayRunAutomatically(ctx, m.access, m.settings, rule); err != nil {
+			skipped[rule.ID] = err.Error()
+			fmt.Fprintf(os.Stderr, "%s: %s: skipped: %v\n", name, rule.Name, err)
+
+			continue
+		}
+
+		plan := planRule(ctx, m.files, rule, "", time.Now())
 		record := RunRecord{At: time.Now(), By: by, Rule: rule.Name}
 
 		switch {
@@ -236,6 +258,10 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 		fmt.Fprintf(os.Stderr, "%s: %s: %d deleted, %d bytes freed %s\n", name, rule.Name, record.Units, record.Freed, record.Error)
 	}
 
+	m.mu.Lock()
+	m.skipped = skipped
+	m.mu.Unlock()
+
 	m.forgetUsage()
 
 	return out
@@ -255,7 +281,13 @@ type State struct {
 	NextRun   time.Time   `json:"next_run,omitzero"`
 	Running   bool        `json:"running"`
 	History   []RunRecord `json:"history"`
-	Error     string      `json:"error,omitempty"`
+	// Skipped is why the last automatic run left a rule out, by rule id.
+	Skipped map[string]string `json:"skipped,omitempty"`
+	// AllowedStorages and AllowedDevices are the operator's lists, so the page
+	// offers only what may be saved.
+	AllowedStorages []string `json:"allowed_storages"`
+	AllowedDevices  []string `json:"allowed_devices"`
+	Error           string   `json:"error,omitempty"`
 }
 
 func (m *module) routes() http.Handler {
@@ -271,7 +303,10 @@ func (m *module) routes() http.Handler {
 		}
 
 		rules, err := m.rules.load()
-		state := State{Rules: rules, Automatic: m.settings.automatic(), History: m.history.list()}
+		state := State{
+			Rules: rules, Automatic: m.settings.automatic(), History: m.history.list(),
+			AllowedStorages: m.settings.AllowedStorages, AllowedDevices: m.settings.AllowedDevices,
+		}
 
 		if err != nil {
 			state.Error = err.Error()
@@ -283,6 +318,12 @@ func (m *module) routes() http.Handler {
 
 		m.mu.Lock()
 		state.NextRun, state.Running = m.nextRun, m.running
+		if len(m.skipped) > 0 {
+			state.Skipped = map[string]string{}
+			for id, why := range m.skipped {
+				state.Skipped[id] = why
+			}
+		}
 		m.mu.Unlock()
 
 		answer(w, http.StatusOK, state)
@@ -309,6 +350,29 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
+		kept, err := m.rules.load()
+		if err != nil {
+			// A broken file is replaced, but every rule is then new and checked.
+			kept = nil
+		}
+
+		rules, err = adopt(r.Context(), m.access, m.settings, routesapi.PrincipalOf(r), kept, rules)
+
+		switch {
+		case errors.Is(err, errNotAllowed):
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
+		case errors.Is(err, errForbidden), errors.Is(err, errNobody):
+			refuse(w, http.StatusForbidden, err)
+
+			return
+		case err != nil:
+			refuse(w, http.StatusBadGateway, err)
+
+			return
+		}
+
 		if err = m.rules.save(rules); err != nil {
 			refuse(w, http.StatusInternalServerError, err)
 
@@ -327,6 +391,7 @@ func (m *module) routes() http.Handler {
 		}
 
 		only := r.URL.Query().Get("rule")
+		person := routesapi.PrincipalOf(r)
 		plans := []RulePlan{}
 
 		for _, rule := range rules {
@@ -334,7 +399,7 @@ func (m *module) routes() http.Handler {
 				continue
 			}
 
-			plan := planRule(r.Context(), m.files, rule, time.Now())
+			plan := m.planFor(r.Context(), rule, person, only != "")
 			if only == "" {
 				// The overview carries the counts; the paths come per rule.
 				plan.Delete = nil
@@ -354,8 +419,18 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
+		if !allowedIn(m.settings.AllowedStorages, storage) {
+			refuse(w, http.StatusUnprocessableEntity, fmt.Errorf("%w: the storage %s is not in allowed_storages", errNotAllowed, storage))
+
+			return
+		}
+
+		// Listed with the person's rights, so the cache is per person.
+		person := routesapi.PrincipalOf(r)
+		key := person + "\x00" + storage
+
 		m.mu.Lock()
-		cached, ok := m.usage[storage]
+		cached, ok := m.usage[key]
 		m.mu.Unlock()
 
 		if ok && r.URL.Query().Get("refresh") == "" && time.Since(cached.Scanned) < 10*time.Minute {
@@ -364,7 +439,7 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
-		usage, err := usageOf(r.Context(), m.files, storage, time.Now())
+		usage, err := usageOf(r.Context(), m.files, storage, person, time.Now())
 		if err != nil {
 			refuse(w, http.StatusBadGateway, err)
 
@@ -372,7 +447,7 @@ func (m *module) routes() http.Handler {
 		}
 
 		m.mu.Lock()
-		m.usage[storage] = usage
+		m.usage[key] = usage
 		m.mu.Unlock()
 
 		answer(w, http.StatusOK, usage)
@@ -384,6 +459,18 @@ func (m *module) routes() http.Handler {
 		var record RunRecord
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&record); err != nil {
 			refuse(w, http.StatusBadRequest, err)
+
+			return
+		}
+
+		if err := record.clean(); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
+		}
+
+		if rules, err := m.rules.load(); err == nil && !slices.ContainsFunc(rules, func(rule Rule) bool { return rule.Name == record.Rule }) {
+			refuse(w, http.StatusUnprocessableEntity, fmt.Errorf("there is no rule named %q", record.Rule))
 
 			return
 		}
@@ -411,6 +498,32 @@ func (m *module) routes() http.Handler {
 	})
 
 	return mux
+}
+
+// planFor plans one rule for the person on the page. A storage rule outside
+// allowed_storages, or a printer rule outside allowed_devices, answers only
+// that. A printer rule is read only when asked for alone (full), because
+// reading a printer is slow and occupies it.
+func (m *module) planFor(ctx context.Context, rule Rule, person string, full bool) RulePlan {
+	if err := m.settings.placeAllowed(rule); err != nil {
+		return RulePlan{
+			RuleID: rule.ID, Name: rule.Name, Target: rule.Target, Storage: rule.Storage, Device: rule.Device,
+			Path: rule.Path, Enabled: rule.Enabled, Delete: []string{}, Error: err.Error(),
+		}
+	}
+
+	if !rule.printer() {
+		return planRule(ctx, m.files, rule, person, time.Now())
+	}
+
+	if !full {
+		return RulePlan{
+			RuleID: rule.ID, Name: rule.Name, Target: targetPrinter, Device: rule.Device, Path: rule.Path,
+			Delete: []string{}, Lazy: true,
+		}
+	}
+
+	return planPrinter(ctx, m.printers, rule, person, time.Now())
 }
 
 func answer(w http.ResponseWriter, status int, body any) {

@@ -17,24 +17,56 @@ import (
 // changed. Mode "folders" judges the folders Depth levels below Path as one
 // unit each, by the newest file inside: a timelapse run, for example, is one
 // folder with a video, a cover and a description, and goes as a whole.
+//
+// Target "printer" points the rule at a printer's own storage (a USB drive or
+// its internal disk) instead of one of the server's storages. Such a rule
+// judges print files one by one, only in the folder it names, and only runs
+// by hand: see printer.go.
+//
+// SavedBy is the principal who last saved the rule in a changed form. The
+// server sets it, never the page. An automatic run deletes for a rule only
+// while that person may still delete in its storage themselves.
 type Rule struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
 	Enabled    bool   `json:"enabled"`
-	Storage    string `json:"storage"`
+	Target     string `json:"target,omitempty"`
+	Storage    string `json:"storage,omitempty"`
+	Device     string `json:"device,omitempty"`
 	Path       string `json:"path"`
 	Mode       string `json:"mode"`
 	Depth      int    `json:"depth,omitempty"`
 	Pattern    string `json:"pattern,omitempty"`
 	KeepDays   int    `json:"keep_days"`
 	KeepNewest int    `json:"keep_newest,omitempty"`
+	SavedBy    string `json:"saved_by,omitempty"`
 }
 
 const (
-	modeFiles   = "files"
-	modeFolders = "folders"
-	maxRules    = 32
+	modeFiles     = "files"
+	modeFolders   = "folders"
+	targetStorage = "storage"
+	targetPrinter = "printer"
+	maxRules      = 32
+	maxDeviceID   = 128
 )
+
+// printFileSuffixes are the only files a printer rule may name. A printer's
+// storage holds the prints themselves, and a rule there never reaches
+// anything else, such as firmware or settings files.
+var printFileSuffixes = []string{".bgcode", ".gcode"}
+
+// sameRule reports whether two rules say the same thing, apart from who saved
+// them. A rule that is unchanged keeps its author when another person saves
+// the list.
+func sameRule(a, b Rule) bool {
+	a.SavedBy, b.SavedBy = "", ""
+
+	return a == b
+}
+
+// printer reports whether the rule points at a printer's storage.
+func (r Rule) printer() bool { return r.Target == targetPrinter }
 
 var errRule = errors.New("the rule is not usable")
 
@@ -62,17 +94,31 @@ func defaultRules() []Rule {
 func (r *Rule) check() error {
 	r.ID = strings.TrimSpace(r.ID)
 	r.Name = strings.TrimSpace(r.Name)
+	r.Target = strings.TrimSpace(r.Target)
 	r.Storage = strings.TrimSpace(r.Storage)
+	r.Device = strings.TrimSpace(r.Device)
 	r.Path = strings.Trim(path.Clean("/"+strings.TrimSpace(r.Path)), "/")
 	r.Pattern = strings.TrimSpace(r.Pattern)
+
+	if r.Target == "" {
+		r.Target = targetStorage
+	}
 
 	switch {
 	case r.ID == "" || len(r.ID) > 64:
 		return fmt.Errorf("%w: id is empty or longer than 64", errRule)
 	case r.Name == "" || len(r.Name) > 80:
 		return fmt.Errorf("%w: %s: the name is empty or longer than 80", errRule, r.ID)
+	case len(r.SavedBy) > 256:
+		return fmt.Errorf("%w: %s: saved_by is longer than 256", errRule, r.ID)
+	case r.Target == targetPrinter:
+		return r.checkPrinter()
+	case r.Target != targetStorage:
+		return fmt.Errorf("%w: %s: target is %q and has to be storage or printer", errRule, r.ID, r.Target)
 	case r.Storage == "":
 		return fmt.Errorf("%w: %s: no storage is named", errRule, r.ID)
+	case r.Device != "":
+		return fmt.Errorf("%w: %s: a storage rule names no printer", errRule, r.ID)
 	case r.Path == "" || r.Path == ".":
 		return fmt.Errorf("%w: %s: the path is the root of the storage, and a rule has to name a folder", errRule, r.ID)
 	case r.KeepDays < 1 || r.KeepDays > 3650:
@@ -99,6 +145,52 @@ func (r *Rule) check() error {
 	}
 
 	return nil
+}
+
+// checkPrinter validates a rule on a printer's storage. Its path starts with
+// the storage the printer reported (usb, local), and that storage itself may
+// be the folder, because that is where print files usually lie. What keeps
+// such a rule narrow is the rest: print files only, one folder, by hand.
+func (r *Rule) checkPrinter() error {
+	switch {
+	case r.Device == "" || len(r.Device) > maxDeviceID:
+		return fmt.Errorf("%w: %s: a printer rule names the printer by its id", errRule, r.ID)
+	case r.Storage != "":
+		return fmt.Errorf("%w: %s: a printer rule names no server storage", errRule, r.ID)
+	case r.Path == "" || r.Path == ".":
+		return fmt.Errorf("%w: %s: the path has to start with the printer's storage, such as usb", errRule, r.ID)
+	case r.Mode != modeFiles:
+		return fmt.Errorf("%w: %s: a printer rule judges files one by one, so mode has to be files", errRule, r.ID)
+	case r.Enabled:
+		return fmt.Errorf("%w: %s: a printer rule only runs by hand and cannot be active", errRule, r.ID)
+	case r.KeepDays < 1 || r.KeepDays > 3650:
+		return fmt.Errorf("%w: %s: keep_days has to be 1 to 3650", errRule, r.ID)
+	case r.KeepNewest < 0 || r.KeepNewest > 100000:
+		return fmt.Errorf("%w: %s: keep_newest has to be 0 or more", errRule, r.ID)
+	}
+
+	r.Depth = 0
+
+	if _, err := path.Match(r.Pattern, "x"); err != nil || !printPattern(r.Pattern) {
+		return fmt.Errorf("%w: %s: a printer rule needs a pattern for print files, such as *.bgcode or *.gcode", errRule, r.ID)
+	}
+
+	return nil
+}
+
+// printPattern reports whether a pattern can only match print files: it ends
+// in one of printFileSuffixes written out, so no wildcard reaches the
+// extension. The file name is matched in lower case (see printer.go).
+func printPattern(pattern string) bool {
+	lower := strings.ToLower(pattern)
+
+	for _, suffix := range printFileSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func checkRules(rules []Rule) error {

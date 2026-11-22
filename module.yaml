@@ -5,14 +5,14 @@
 # the sidebar. User-facing texts are German.
 #
 # Install (see README.md):
-#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.2.0 -from <release> -approve
+#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.3.0 -from <release> -approve
 
 name: cleanup
 title: Aufräumen
-summary: Löscht alte Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen nach Regeln je Ordner. Zeigt vorher, was weg kann, und wie sich der Speicher verteilt.
+summary: Löscht alte Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen nach Regeln je Ordner, auf Wunsch auch alte Druckdateien vom USB-Speicher eines Druckers. Zeigt vorher, was weg kann, und wie sich der Speicher verteilt.
 codeowner: Gilbert-1705
 kind: sink
-version: 0.2.0
+version: 0.3.0
 license: MIT
 contract_major: 1
 openapi: openapi.json
@@ -24,11 +24,27 @@ platforms:
 
 require:
   core-storage.list: "*"
+  core-access.check: "*"
+  core-device.get: "*"
+  core-device.jobs: "*"
+  core-device.files: "*"
 
-# read_storage: scan the storages. Deleting happens from the page with the
-# signed-in person's rights or, automatically, with the API token.
+# read_storage: scan the storages for the automatic run. Deleting happens from
+# the page with the signed-in person's rights or, automatically, with the API
+# token. Printers are only read for the person on the page, with their rights,
+# so the module holds no right on any printer.
 permissions:
   - read_storage
+
+# Asked, never taken: whether the person saving a rule may delete there
+# (write_storage on storages, operate on the printer), and again before every
+# automatic run for the person who saved the rule. See policy.go.
+checks:
+  - write_storage
+  - operate
+# The automatic run asks about the rule's author, who is usually not on the
+# page at that moment.
+check_absent_people: true
 
 needs:
   # Rules (regeln.json) and history (verlauf.json).
@@ -38,7 +54,7 @@ egress:
   - option: core_url
     ports: [8080, 80, 443]
     from: process
-    why: Löscht beim automatischen Lauf über die HTTP-API des eigenen Servers, weil das Modulprotokoll keine Löschung kennt.
+    why: Löscht beim automatischen Lauf über die HTTP-API des eigenen Servers, weil das Modulprotokoll keine Löschung kennt. Der Port ist der aus core_url, wenn der Server nicht auf 8080 läuft.
     sends: Die Pfade der zu löschenden Dateien und das API-Token.
 
 options:
@@ -54,6 +70,14 @@ options:
     type: duration
     default: "0s"
     summary: Wie oft die aktiven Regeln automatisch laufen, z. B. 6h. 0s schaltet das aus. Braucht api_token.
+  - key: allowed_storages
+    type: list
+    default: '["local"]'
+    summary: Die Speicher, auf die Regeln zeigen dürfen. "*" erlaubt alle. Was nicht in der Liste steht, wird weder gespeichert noch aufgeräumt.
+  - key: allowed_devices
+    type: list
+    default: "[]"
+    summary: Die Drucker (IDs), auf deren eigenem Speicher Regeln Druckdateien löschen dürfen, nur von Hand. "*" erlaubt alle, leer keinen.
 
 ui:
   entry: ui/index.js

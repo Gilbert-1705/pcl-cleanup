@@ -70,7 +70,9 @@ target/
 
 # Build
 release/
+# Local Go binaries (go build)
 /cleanup
+/pcl-cleanup
 
 # Module runtime data, if tested locally
 regeln.json

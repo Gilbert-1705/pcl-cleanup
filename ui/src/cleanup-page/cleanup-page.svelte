@@ -10,8 +10,10 @@
   } from '@prusa/connect-ui';
 
   import {
+    allowed,
     bytes,
     deletePaths,
+    deletePrinterFiles,
     readPlan,
     readPlans,
     readState,
@@ -41,6 +43,8 @@
   let editingIndex = $state(-1);
 
   let storages = $state<string[]>([]);
+  let printers = $state<{ id: string; name: string }[]>([]);
+  let reading = $state('');
   let usageStorage = $state('');
   let usage = $state<Usage | undefined>(undefined);
   let usageBusy = $state(false);
@@ -78,19 +82,59 @@
     }
   };
 
+  // Nur was die Einstellungen der Erweiterung zulassen (allowed_storages,
+  // allowed_devices), und bei Druckern nur die, die die angemeldete Person
+  // bedienen darf: Gelöscht wird dort mit ihren Rechten.
+  const loadPlaces = async (): Promise<void> => {
+    try {
+      const answer = await host.client.listStorages();
+      storages = (answer.items ?? [])
+        .map((s) => s.name)
+        .filter((name) => allowed(current?.allowed_storages, name));
+      usageStorage = storages.includes('local') ? 'local' : (storages[0] ?? '');
+      void loadUsage(false);
+    } catch {
+      storages = [];
+    }
+
+    if ((current?.allowed_devices ?? []).length === 0) {
+      printers = [];
+
+      return;
+    }
+
+    try {
+      const answer = await host.client.listDevices({ query: { limit: 200 } });
+      printers = (answer.items ?? [])
+        .filter((d) => allowed(current?.allowed_devices, d.id) && (d.actions ?? []).includes('operate'))
+        .map((d) => ({ id: d.id, name: d.name || d.model || d.id }));
+    } catch {
+      printers = [];
+    }
+  };
+
   $effect(() => {
-    void load().then(scan);
-    void host.client
-      .listStorages()
-      .then((answer) => {
-        storages = (answer.items ?? []).map((s) => s.name);
-        usageStorage = storages.includes('local') ? 'local' : (storages[0] ?? '');
-        void loadUsage(false);
-      })
-      .catch(() => {
-        storages = [];
-      });
+    void load().then(async () => {
+      await loadPlaces();
+      await scan();
+    });
   });
+
+  const printerName = (id: string | undefined): string =>
+    printers.find((p) => p.id === id)?.name ?? id ?? '';
+
+  // Den Drucker lesen dauert und belegt ihn, deshalb nur auf Knopfdruck.
+  const readPrinter = async (rule: Rule): Promise<void> => {
+    reading = rule.id;
+    try {
+      const plan = await readPlan(host, rule.id);
+      if (plan) plans = { ...plans, [rule.id]: plan };
+    } catch (error) {
+      problem = String(error);
+    } finally {
+      reading = '';
+    }
+  };
 
   const clean = async (rule: Rule): Promise<void> => {
     busyRule = rule.id;
@@ -109,10 +153,14 @@
 
       let failure = '';
       let done = 0;
+      const step = (n: number): void => {
+        progress = `${n} von ${paths.length} gelöscht …`;
+      };
       try {
-        done = await deletePaths(host, plan.storage, paths, (n) => {
-          progress = `${n} von ${paths.length} gelöscht …`;
-        });
+        done =
+          plan.target === 'printer'
+            ? await deletePrinterFiles(host, plan.device ?? '', paths, step)
+            : await deletePaths(host, plan.storage ?? '', paths, step);
       } catch (error) {
         failure = String(error);
       }
@@ -160,11 +208,12 @@
     editingIndex = index;
     editing =
       index >= 0 && current
-        ? { ...current.rules[index]! }
+        ? { target: 'storage', ...current.rules[index]! }
         : {
             id: `regel-${Date.now().toString(36)}`,
             name: 'Neue Regel',
             enabled: false,
+            target: 'storage',
             storage: storages[0] ?? 'local',
             path: '',
             mode: 'files',
@@ -172,6 +221,27 @@
             keep_days: 14,
             keep_newest: 0,
           };
+  };
+
+  // Beim Wechsel auf den Drucker-Speicher die Vorgaben, die eine Drucker-Regel
+  // braucht: nur Druckdateien, einzeln, nur von Hand.
+  const chooseTarget = (target: 'storage' | 'printer'): void => {
+    if (!editing) return;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    const { storage, device, ...rest } = editing;
+    editing =
+      target === 'printer'
+        ? {
+            ...rest,
+            target,
+            device: printers[0]?.id ?? '',
+            path: 'usb',
+            mode: 'files',
+            pattern: '*.bgcode',
+            enabled: false,
+            keep_days: 90,
+          }
+        : { ...rest, target, storage: storages[0] ?? 'local', path: '', pattern: '*.jpg' };
   };
 
   const saveRules = async (rules: Rule[]): Promise<boolean> => {
@@ -196,6 +266,8 @@
       keep_newest: Number(editing.keep_newest ?? 0),
       depth: editing.mode === 'folders' ? Number(editing.depth ?? 1) : 0,
     };
+    // saved_by setzt der Server, nie die Seite.
+    delete rule.saved_by;
     const rules = [...current.rules];
     if (editingIndex >= 0) rules[editingIndex] = rule;
     else rules.push(rule);
@@ -222,9 +294,16 @@
   };
 
   const describeWhat = (rule: Rule): string =>
-    rule.mode === 'folders'
-      ? `Ordner auf Ebene ${rule.depth ?? 1} unter ${rule.path} als Ganzes`
-      : `Dateien unter ${rule.path}${rule.pattern ? ` (${rule.pattern})` : ''}`;
+    rule.target === 'printer'
+      ? `Druckdateien in ${rule.path} (${rule.pattern ?? ''}), ohne Unterordner`
+      : rule.mode === 'folders'
+        ? `Ordner auf Ebene ${rule.depth ?? 1} unter ${rule.path} als Ganzes`
+        : `Dateien unter ${rule.path}${rule.pattern ? ` (${rule.pattern})` : ''}`;
+
+  const describeWhere = (rule: Rule): string =>
+    rule.target === 'printer' ? `Drucker ${printerName(rule.device)}` : (rule.storage ?? '');
+
+  const unitWord = (rule: Rule): string => (rule.mode === 'folders' ? 'Ordner' : 'Dateien');
 
   const field =
     'h-8 rounded-sm border border-border bg-background px-2 text-sm text-foreground';
@@ -267,19 +346,35 @@
             <li class="flex flex-col gap-2 border-b border-border pb-3">
               <div class="flex flex-wrap items-center gap-2">
                 <span class="font-medium">{rule.name}</span>
-                <Badge variant={rule.enabled ? 'success' : 'secondary'}>
-                  {rule.enabled ? 'aktiv' : 'aus'}
-                </Badge>
-                <span class="text-xs text-muted-foreground">{rule.storage}: {describeWhat(rule)}</span>
+                {#if rule.target === 'printer'}
+                  <Badge variant="secondary">nur von Hand</Badge>
+                {:else}
+                  <Badge variant={rule.enabled ? 'success' : 'secondary'}>
+                    {rule.enabled ? 'aktiv' : 'aus'}
+                  </Badge>
+                {/if}
+                <span class="text-xs text-muted-foreground">{describeWhere(rule)}: {describeWhat(rule)}</span>
               </div>
               <p class="text-sm text-muted-foreground">Löschen: {describeKeep(rule)}</p>
+              {#if current.automatic && rule.enabled && rule.target !== 'printer' && !rule.saved_by}
+                <p class="text-sm text-muted-foreground">
+                  Läuft erst automatisch, wenn jemand mit Löschrecht die Regel einmal speichert.
+                </p>
+              {/if}
+              {#if current.skipped?.[rule.id]}
+                <p class="text-sm text-warning-text">Beim letzten automatischen Lauf ausgelassen: {current.skipped[rule.id]}</p>
+              {/if}
 
               {#if plan?.error}
                 <p class="text-sm text-destructive-text">{plan.error}</p>
+              {:else if plan?.lazy}
+                <p class="text-sm text-muted-foreground">
+                  Noch nicht gelesen. Den Drucker zu lesen dauert etwas und geht nicht während eines Drucks.
+                </p>
               {:else if plan}
                 <p class="text-sm">
                   {plan.units}
-                  {rule.mode === 'folders' ? 'Ordner' : 'Dateien'}, {bytes(plan.size)}
+                  {unitWord(rule)}, {bytes(plan.size)}
                   {#if plan.oldest && when(plan.oldest)}· ältestes vom {when(plan.oldest)}{/if}
                   · <strong>
                     {plan.delete_units} zu löschen ({bytes(plan.delete_size)})
@@ -291,9 +386,20 @@
               {/if}
 
               <div class="flex flex-wrap gap-2">
+                {#if rule.target === 'printer'}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={reading !== '' || busyRule !== ''}
+                    pending={reading === rule.id}
+                    onclick={() => void readPrinter(rule)}
+                  >
+                    Drucker lesen
+                  </Button>
+                {/if}
                 <ConfirmDialog
                   title={`${rule.name} aufräumen?`}
-                  description={`${plan?.delete_units ?? 'Alle'} ${rule.mode === 'folders' ? 'Ordner' : 'Dateien'} ${describeKeep(rule)} unter ${rule.storage}:${rule.path} werden endgültig gelöscht${plan ? ` (${bytes(plan.delete_size)})` : ''}.`}
+                  description={`${plan?.delete_units ?? 'Alle'} ${unitWord(rule)} ${describeKeep(rule)} unter ${describeWhere(rule)}:${rule.path} werden endgültig gelöscht${plan ? ` (${bytes(plan.delete_size)})` : ''}.${rule.target === 'printer' ? ' Vorher wird der Drucker noch einmal gelesen.' : ''}`}
                   confirmLabel="Löschen"
                   variant="destructive"
                   onConfirm={() => void clean(rule)}
@@ -303,16 +409,19 @@
                       {...props}
                       variant="destructive"
                       size="sm"
-                      disabled={busyRule !== '' || (plan !== undefined && plan.delete_units === 0)}
+                      disabled={busyRule !== '' ||
+                        (plan !== undefined && (plan.lazy || Boolean(plan.error) || plan.delete_units === 0))}
                       pending={busyRule === rule.id}
                     >
                       Jetzt aufräumen
                     </Button>
                   {/snippet}
                 </ConfirmDialog>
-                <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
-                  {rule.enabled ? 'Ausschalten' : 'Einschalten'}
-                </Button>
+                {#if rule.target !== 'printer'}
+                  <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
+                    {rule.enabled ? 'Ausschalten' : 'Einschalten'}
+                  </Button>
+                {/if}
                 <Button variant="ghost" size="sm" onclick={() => startEdit(index)}>Bearbeiten</Button>
                 <ConfirmDialog
                   title="Regel entfernen?"
@@ -342,26 +451,64 @@
               Name
               <input class={field} bind:value={editing.name} required maxlength="80" />
             </label>
-            <label class="flex flex-col gap-1 text-sm">
-              Speicher
-              <select class={field} bind:value={editing.storage}>
-                {#each storages.length ? storages : [editing.storage] as name (name)}
-                  <option value={name}>{name}</option>
-                {/each}
-              </select>
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              Ordner (nie die oberste Ebene)
-              <input class={field} bind:value={editing.path} required placeholder="z. B. camera" />
-            </label>
-            <label class="flex flex-col gap-1 text-sm">
-              Was wird beurteilt
-              <select class={field} bind:value={editing.mode}>
-                <option value="files">einzelne Dateien</option>
-                <option value="folders">ganze Ordner (z. B. ein Zeitraffer)</option>
-              </select>
-            </label>
-            {#if editing.mode === 'files'}
+            {#if printers.length > 0 || editing.target === 'printer'}
+              <label class="flex flex-col gap-1 text-sm">
+                Wo
+                <select
+                  class={field}
+                  value={editing.target ?? 'storage'}
+                  onchange={(event) => chooseTarget(event.currentTarget.value as 'storage' | 'printer')}
+                >
+                  <option value="storage">Speicher des Servers</option>
+                  <option value="printer">Speicher eines Druckers (USB)</option>
+                </select>
+              </label>
+            {/if}
+            {#if editing.target === 'printer'}
+              <label class="flex flex-col gap-1 text-sm">
+                Drucker
+                <select class={field} bind:value={editing.device} required>
+                  {#each printers.length ? printers : [{ id: editing.device ?? '', name: editing.device ?? '' }] as printer (printer.id)}
+                    <option value={printer.id}>{printer.name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                Ordner auf dem Drucker (ohne Unterordner)
+                <input class={field} bind:value={editing.path} required placeholder="usb" />
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                Nur Druckdateien wie
+                <input class={field} bind:value={editing.pattern} required placeholder="*.bgcode" />
+              </label>
+              <p class="text-sm text-muted-foreground @md:col-span-2">
+                Nur von Hand, nie während eines Drucks, nie die Datei des laufenden oder letzten Drucks und
+                nie Dateien ohne Datum. Gelöscht wird mit deinen Rechten am Drucker.
+              </p>
+            {:else}
+              <label class="flex flex-col gap-1 text-sm">
+                Speicher
+                <select class={field} bind:value={editing.storage}>
+                  {#each storages.length ? storages : [editing.storage ?? ''] as name (name)}
+                    <option value={name}>{name}</option>
+                  {/each}
+                </select>
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                Ordner (nie die oberste Ebene)
+                <input class={field} bind:value={editing.path} required placeholder="z. B. camera" />
+              </label>
+              <label class="flex flex-col gap-1 text-sm">
+                Was wird beurteilt
+                <select class={field} bind:value={editing.mode}>
+                  <option value="files">einzelne Dateien</option>
+                  <option value="folders">ganze Ordner (z. B. ein Zeitraffer)</option>
+                </select>
+              </label>
+            {/if}
+            {#if editing.target === 'printer'}
+              <!-- Druckdateien werden immer einzeln beurteilt. -->
+            {:else if editing.mode === 'files'}
               <label class="flex flex-col gap-1 text-sm">
                 Nur Dateien wie (leer = alle)
                 <input class={field} bind:value={editing.pattern} placeholder="*.jpg" />
@@ -380,10 +527,12 @@
               Die neuesten immer behalten (Anzahl)
               <input class={field} type="number" min="0" bind:value={editing.keep_newest} />
             </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input type="checkbox" bind:checked={editing.enabled} />
-              aktiv (für den automatischen Lauf)
-            </label>
+            {#if editing.target !== 'printer'}
+              <label class="flex items-center gap-2 text-sm">
+                <input type="checkbox" bind:checked={editing.enabled} />
+                aktiv (für den automatischen Lauf)
+              </label>
+            {/if}
             <div class="flex gap-2 @md:col-span-2">
               <Button type="submit" size="sm">Speichern</Button>
               <Button variant="ghost" size="sm" onclick={() => (editing = undefined)}>Abbrechen</Button>
@@ -405,7 +554,9 @@
     <CardContent>
       {#if current?.automatic}
         <p class="text-sm">
-          Alle {current.interval} werden die aktiven Regeln ausgeführt.
+          Alle {current.interval} werden die aktiven Regeln für Server-Speicher ausgeführt, jede nur,
+          solange die Person, die sie gespeichert hat, dort selbst löschen darf. Drucker-Regeln laufen
+          nur von Hand.
           {#if when(current.next_run)}Nächster Lauf: {when(current.next_run)}.{/if}
         </p>
         <div class="mt-2">
