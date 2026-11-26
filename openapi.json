@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "cleanup",
-    "version": "0.4.1",
+    "version": "0.5.0",
     "description": "The routes of the cleanup module. Every path is relative to the mount the host assigns."
   },
   "paths": {
@@ -186,8 +186,8 @@
     "/auto/run": {
       "post": {
         "operationId": "run-now",
-        "summary": "Run every enabled rule now",
-        "description": "Runs the enabled rules as the schedule does: storage rules with the module's API token, printer rules (only with printer_auto) as the module itself, each rule only while the person who saved it may still delete there. Refused with 409 when neither api_token nor printer_auto with auto_interval is set. The host takes operate_resource on the module's instance before this is called.",
+        "summary": "Run the active printer rules now",
+        "description": "Runs the active printer rules as the schedule does, as the module itself, each rule only while the person who saved it may still operate that printer. Storage rules never run here: the page runs them with the person's own rights. Refused with 409 unless printer_auto and auto_interval are set. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -207,7 +207,7 @@
       "get": {
         "operationId": "read-overview",
         "summary": "The rules, the schedule and the last runs",
-        "description": "Every rule, whether the module deletes on its own schedule and when next, why the last automatic run skipped a rule, the operator's allowed storages and printers, the settings of the automatic printer run, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
+        "description": "Every rule, the interval of the automatic printer run and when it runs next, why the last automatic run skipped a rule, the operator's allowed storages and printers, the settings of the automatic printer run, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",

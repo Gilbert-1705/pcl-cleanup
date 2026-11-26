@@ -1,13 +1,33 @@
 # Changelog
 
 What an operator sees change when they upgrade this module, newest release
-first. `version:` in `module.yaml` is the newest heading below. The page and
-the settings of the module are German; the names below are the setting keys
-and routes as they appear in `module.yaml` and `openapi.json`.
+first. `version:` in `module.yaml` is the newest heading below. The names
+below are the setting keys and routes as they appear in `module.yaml` and
+`openapi.json`.
+
+## 0.5.0 - 2026-11-26
+
+### Removed
+
+- The settings `api_token` and `core_url`, and with them every network connection of the module: `module.yaml` declares no `egress` any more. Storage rules no longer run on a schedule, because the module protocol cannot delete in a storage and the API credential gave the module more rights than it asks for at install. Running them on their own again waits for a delete call in the module protocol, see `ROADMAP.md`.
+- Before updating from 0.4.x, remove `api_token` and `core_url` from the extension's settings: the server refuses settings a module no longer declares. Then delete the API credential created for this extension.
+
+### Added
+
+- „Run due rules“ on the page: every active storage rule that has something to delete, planned again just before it deletes, with the rights of the signed-in person.
+- `ROADMAP.md`.
+
+### Changed
+
+- The page is English with a German translation (`ui/src/locales/`), shown in the reader's language. Sizes and dates follow the reader's language. The texts in `module.yaml` are English.
+- An active storage rule now means that it is part of „Run due rules“.
+- `auto_interval` only drives the automatic printer run; `POST /auto/run` only runs printer rules and is refused unless `printer_auto` and `auto_interval` are set.
+- The default rules on a new install are called „Camera snapshots“, „Timelapses“ and „PrintWatch snapshots“. Existing rules keep their names.
+- The history writes who ran a cleanup as a code (`schedule`, `request`, `hand:<person>`), which the page words in the reader's language. Entries from older versions are shown as they were written.
 
 ## 0.4.1 - 2026-11-22
 
-First release through the Prusa Plugin Marketplace.
+Submitted to the Prusa Plugin Marketplace; not published there (see 0.5.0).
 
 ### Changed
 

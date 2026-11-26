@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"path"
 	"slices"
 	"sort"
@@ -186,41 +185,6 @@ func TestUsageAddsUpEachTopLevelFolder(t *testing.T) {
 	}
 }
 
-func TestTheDeleterSendsBatchesWithTheToken(t *testing.T) {
-	var batches [][]string
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/storages/local/deletions" || r.Header.Get("Authorization") != "Bearer pcl_x" {
-			w.WriteHeader(http.StatusForbidden)
-
-			return
-		}
-
-		var body struct{ Paths []string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		batches = append(batches, body.Paths)
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	paths := make([]string, 450)
-	for i := range paths {
-		paths[i] = "camera/x/" + time.Unix(int64(i), 0).Format("150405") + ".jpg"
-	}
-
-	d := deleter{base: server.URL, token: "pcl_x", client: server.Client()}
-
-	done, err := d.remove(context.Background(), "local", paths)
-	if err != nil || done != 450 || len(batches) != 3 || len(batches[2]) != 50 {
-		t.Fatalf("done %d, %d batches, %v", done, len(batches), err)
-	}
-
-	d.token = "wrong"
-	if _, err = d.remove(context.Background(), "local", paths[:1]); err == nil {
-		t.Fatal("a refusal was not reported")
-	}
-}
-
 func TestTheRoutesServeStatePlanAndRules(t *testing.T) {
 	access := &fakeAccess{allow: map[string]bool{"user:anna write_storage resource_kind/storage": true}}
 	m := &module{files: storageWith(), access: access}
@@ -231,7 +195,7 @@ func TestTheRoutesServeStatePlanAndRules(t *testing.T) {
 
 	h := m.routes()
 
-	if rec := call(t, h, "user:anna", "GET", "/overview", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "kamera-snapshots") {
+	if rec := call(t, h, "user:anna", "GET", "/overview", ""); rec.Code != 200 || !strings.Contains(rec.Body.String(), "camera-snapshots") {
 		t.Fatalf("state: %d %s", rec.Code, rec.Body)
 	}
 
@@ -251,6 +215,6 @@ func TestTheRoutesServeStatePlanAndRules(t *testing.T) {
 	}
 
 	if rec = call(t, h, "user:anna", "POST", "/auto/run", ""); rec.Code != http.StatusConflict {
-		t.Fatalf("a run without a token was answered %d", rec.Code)
+		t.Fatalf("a run without printer_auto was answered %d", rec.Code)
 	}
 }

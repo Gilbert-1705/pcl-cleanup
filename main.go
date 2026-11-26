@@ -3,11 +3,12 @@
 // extensions leave behind.
 //
 // Rules say which folder of which storage keeps how much. The page shows what
-// each rule would delete and deletes it with the signed-in person's rights.
-// With an API token set, the module also runs the rules on its own schedule,
-// for each rule only while the person who saved it may still delete there
-// (policy.go). Rules on a printer's own storage run by hand (printer.go), and
-// on the schedule only when the operator turns that on (auto_printer.go).
+// each rule would delete and which active rules are due, and deletes with the
+// signed-in person's rights. The module protocol cannot delete in a storage,
+// so storage rules never run on their own; see ROADMAP.md. Rules on a
+// printer's own storage run by hand (printer.go), and on the schedule only
+// when the operator turns that on (auto_printer.go), for each rule only while
+// the person who saved it may still delete there (policy.go).
 package main
 
 import (
@@ -38,7 +39,7 @@ import (
 
 const (
 	name    = "cleanup"
-	release = extension.Version("0.4.1")
+	release = extension.Version("0.5.0")
 )
 
 //go:embed openapi.json
@@ -161,15 +162,15 @@ func (m *module) start(ctx context.Context, settings Settings, dir string) error
 			}()
 		}
 
-		if settings.interval > 0 && !settings.automatic() {
-			fmt.Fprintf(os.Stderr, "%s: auto_interval is set but api_token is not, so storage rules are not run on their own\n", name)
+		if settings.interval > 0 && !settings.PrinterAuto {
+			fmt.Fprintf(os.Stderr, "%s: auto_interval is set but printer_auto is off, so nothing runs on its own; storage rules run from the page\n", name)
 		}
 	})
 
 	return err
 }
 
-// schedule runs every enabled rule each auto_interval, starting a few
+// schedule runs every active printer rule each auto_interval, starting a few
 // minutes after the module starts, when the server has settled.
 func (m *module) schedule(ctx context.Context) {
 	next := time.Now().Add(5 * time.Minute)
@@ -185,7 +186,7 @@ func (m *module) schedule(ctx context.Context) {
 		case <-time.After(time.Until(next)):
 		}
 
-		m.runAll(ctx, "automatisch")
+		m.runAll(ctx, bySchedule)
 
 		next = time.Now().Add(m.settings.interval)
 	}
@@ -210,26 +211,20 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 
 	rules, err := m.rules.load()
 	if err != nil {
-		record := RunRecord{At: time.Now(), By: by, Rule: "alle", Error: err.Error()}
+		record := RunRecord{At: time.Now(), By: by, Rule: "*", Error: err.Error()}
 		m.history.add(record)
 
 		return []RunRecord{record}
 	}
-
-	d := deleter{base: m.settings.CoreURL, token: m.settings.APIToken, client: coreClient()}
 
 	var out []RunRecord
 
 	skipped := map[string]string{}
 
 	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-
-		if !rule.printer() && !m.settings.automatic() {
-			skipped[rule.ID] = "api_token is not set, so storage rules only run by hand"
-
+		// Storage rules run from the page only: the module protocol cannot
+		// delete in a storage (ROADMAP.md).
+		if !rule.Enabled || !rule.printer() {
 			continue
 		}
 
@@ -240,52 +235,21 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 			continue
 		}
 
-		if rule.printer() {
-			record, skip := runPrinter(ctx, m.printers, m.files, rule, m.settings, by, time.Now())
-			if skip != nil {
-				skipped[rule.ID] = skip.Error()
-				fmt.Fprintf(os.Stderr, "%s: %s: skipped: %v\n", name, rule.Name, skip)
-
-				continue
-			}
-
-			if record.Units == 0 && record.Error == "" {
-				continue
-			}
-
-			m.history.add(record)
-			out = append(out, record)
-			fmt.Fprintf(os.Stderr, "%s: %s: %d files, %d bytes, dry run %v %s\n", name, rule.Name, record.Units, record.Freed, record.DryRun, record.Error)
+		record, skip := runPrinter(ctx, m.printers, m.files, rule, m.settings, by, time.Now())
+		if skip != nil {
+			skipped[rule.ID] = skip.Error()
+			fmt.Fprintf(os.Stderr, "%s: %s: skipped: %v\n", name, rule.Name, skip)
 
 			continue
 		}
 
-		plan := planRule(ctx, m.files, rule, "", time.Now())
-		record := RunRecord{At: time.Now(), By: by, Rule: rule.Name}
-
-		switch {
-		case plan.Error != "":
-			record.Error = plan.Error
-		case len(plan.Delete) == 0:
+		if record.Units == 0 && record.Error == "" {
 			continue
-		default:
-			done, err := d.remove(ctx, rule.Storage, plan.Delete)
-			record.Units = done
-			record.Partial = plan.Truncated || done < len(plan.Delete)
-
-			if plan.DeleteUnits > 0 {
-				record.Files = plan.DeleteFiles * done / plan.DeleteUnits
-				record.Freed = plan.DeleteSize * int64(done) / int64(plan.DeleteUnits)
-			}
-
-			if err != nil {
-				record.Error = err.Error()
-			}
 		}
 
 		m.history.add(record)
 		out = append(out, record)
-		fmt.Fprintf(os.Stderr, "%s: %s: %d deleted, %d bytes freed %s\n", name, rule.Name, record.Units, record.Freed, record.Error)
+		fmt.Fprintf(os.Stderr, "%s: %s: %d files, %d bytes, dry run %v %s\n", name, rule.Name, record.Units, record.Freed, record.DryRun, record.Error)
 	}
 
 	m.mu.Lock()
@@ -305,12 +269,11 @@ func (m *module) forgetUsage() {
 
 // State is what the page reads first.
 type State struct {
-	Rules     []Rule      `json:"rules"`
-	Automatic bool        `json:"automatic"`
-	Interval  string      `json:"interval"`
-	NextRun   time.Time   `json:"next_run,omitzero"`
-	Running   bool        `json:"running"`
-	History   []RunRecord `json:"history"`
+	Rules    []Rule      `json:"rules"`
+	Interval string      `json:"interval"`
+	NextRun  time.Time   `json:"next_run,omitzero"`
+	Running  bool        `json:"running"`
+	History  []RunRecord `json:"history"`
 	// Skipped is why the last automatic run left a rule out, by rule id.
 	Skipped map[string]string `json:"skipped,omitempty"`
 	// AllowedStorages and AllowedDevices are the operator's lists, so the page
@@ -340,7 +303,7 @@ func (m *module) routes() http.Handler {
 
 		rules, err := m.rules.load()
 		state := State{
-			Rules: rules, Automatic: m.settings.automatic(), History: m.history.list(),
+			Rules: rules, History: m.history.list(),
 			AllowedStorages: m.settings.AllowedStorages, AllowedDevices: m.settings.AllowedDevices,
 			PrinterAuto: m.settings.PrinterAuto, PrinterAutomatic: m.settings.printerAutomatic(),
 			PrinterAutoMax: m.settings.printerMax, DryRun: m.settings.dryRun,
@@ -542,7 +505,7 @@ func (m *module) routes() http.Handler {
 		}
 
 		record.At = time.Now()
-		record.By = "von Hand (" + routesapi.PrincipalOf(r) + ")"
+		record.By = byHand + routesapi.PrincipalOf(r)
 		m.history.add(record)
 		m.forgetUsage()
 
@@ -551,12 +514,12 @@ func (m *module) routes() http.Handler {
 
 	mux.HandleFunc("POST /auto/run", func(w http.ResponseWriter, r *http.Request) {
 		if !m.settings.scheduled() {
-			refuse(w, http.StatusConflict, fmt.Errorf("automatic cleanup needs auto_interval and api_token or printer_auto in the settings"))
+			refuse(w, http.StatusConflict, fmt.Errorf("the automatic printer run needs auto_interval and printer_auto in the settings"))
 
 			return
 		}
 
-		answer(w, http.StatusOK, map[string]any{"runs": m.runAll(r.Context(), "von Hand angestoßen")})
+		answer(w, http.StatusOK, map[string]any{"runs": m.runAll(r.Context(), byRequest)})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {

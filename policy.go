@@ -20,8 +20,9 @@ import (
 //  2. The author's own rights: saving a changed rule asks the server whether
 //     the person saving it may delete there (write_storage on storages,
 //     operate on the printer). The rule remembers that person, and an
-//     automatic run asks again for them before it deletes anything, because
-//     the API token it deletes with may hold more rights than they do.
+//     automatic printer run asks again for them before it deletes anything,
+//     because the module deletes there as itself, with the operator role the
+//     operator gave it, which may be more than that person may.
 //
 // A rule nobody has saved since 0.3.0 (the defaults, or rules from an older
 // version) has no author, so it never runs automatically until somebody saves

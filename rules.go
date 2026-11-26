@@ -87,19 +87,20 @@ func (r Rule) needsCopy() bool { return r.printer() && !r.SkipCopyCheck }
 
 var errRule = errors.New("the rule is not usable")
 
-// defaultRules are what a fresh install starts with.
+// defaultRules are what a fresh install starts with. The timelapse rule points
+// at zeitraffer/, the folder pcl-timelapse writes to by default.
 func defaultRules() []Rule {
 	return []Rule{
 		{
-			ID: "kamera-snapshots", Name: "Kamera-Snapshots", Enabled: true,
+			ID: "camera-snapshots", Name: "Camera snapshots", Enabled: true,
 			Storage: "local", Path: "camera", Mode: modeFiles, Pattern: "*.jpg", KeepDays: 14,
 		},
 		{
-			ID: "zeitraffer", Name: "Zeitraffer", Enabled: true,
+			ID: "timelapses", Name: "Timelapses", Enabled: true,
 			Storage: "local", Path: "zeitraffer", Mode: modeFolders, Depth: 2, KeepDays: 180, KeepNewest: 10,
 		},
 		{
-			ID: "printwatch", Name: "PrintWatch-Snapshots", Enabled: false,
+			ID: "printwatch", Name: "PrintWatch snapshots", Enabled: false,
 			Storage: "local", Path: "printwatch", Mode: modeFiles, Pattern: "*.jpg", KeepDays: 7,
 		},
 	}

@@ -2,7 +2,7 @@ import type { ModuleHost } from '@prusa/connect-ui/slots';
 
 let held: ModuleHost | undefined;
 
-/** Hält den Host fest, den die App beim Laden des Moduls übergibt. */
+/** Holds the host the app hands over when it loads the module. */
 export const holdHost = (host: ModuleHost): void => {
   if (host.signal.aborted) return;
   held = host;
@@ -17,7 +17,7 @@ export const holdHost = (host: ModuleHost): void => {
 
 export const heldHost = (): ModuleHost => {
   if (!held) {
-    throw new Error('Die Aufräum-Erweiterung wurde gezeichnet, bevor sie geladen war.');
+    throw new Error('The cleanup extension was drawn before it was loaded.');
   }
 
   return held;
