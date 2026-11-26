@@ -47,12 +47,15 @@ require:
 permissions:
   - read_storage
 
-# Asked, never taken: whether the person saving a rule may delete there
-# (write_storage on storages, operate on the printer), and again before every
-# automatic printer run for the person who saved the rule. See policy.go.
+# Asked, never taken: whether the person saving or removing a rule may delete
+# there (write_storage on storages, operate on the printer), and again before
+# every automatic printer run for the person who saved the rule (policy.go).
+# observe: the page shows what a printer rule did on a printer, and who saved
+# a rule, only to a person who may see that printer (visibility.go).
 checks:
   - write_storage
   - operate
+  - observe
 # The automatic printer run asks about the rule's author, who is usually not on
 # the page at that moment.
 check_absent_people: true

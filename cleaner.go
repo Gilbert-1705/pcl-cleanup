@@ -128,8 +128,11 @@ type RunRecord struct {
 	Error   string    `json:"error,omitempty"`
 	Partial bool      `json:"partial,omitempty"`
 	// Deleted names each file an automatic printer run deleted, or would
-	// have deleted in a dry run.
+	// have deleted in a dry run, and Device the printer it ran on. Only the
+	// overview's reader who may observe that printer gets either
+	// (visibility.go).
 	Deleted []string `json:"deleted,omitempty"`
+	Device  string   `json:"device,omitempty"`
 	DryRun  bool     `json:"dry_run,omitempty"`
 }
 
@@ -154,8 +157,8 @@ func (r *RunRecord) clean() error {
 		return errors.New("units, files and freed cannot be negative")
 	}
 
-	// Only the module writes the files of an automatic run.
-	r.Deleted, r.DryRun = nil, false
+	// Only the module writes the files and the printer of an automatic run.
+	r.Deleted, r.Device, r.DryRun = nil, "", false
 
 	if len(r.Error) > maxRecordError {
 		r.Error = strings.ToValidUTF8(r.Error[:maxRecordError], "") + " …"
@@ -189,8 +192,13 @@ func (h *history) add(r RunRecord) {
 		h.runs = h.runs[:historyLength]
 	}
 
+	// Through a file of its own and a rename, as the rules, so a crash while
+	// writing leaves the old history and not a broken one.
 	if raw, err := json.MarshalIndent(h.runs, "", "  "); err == nil {
-		_ = os.WriteFile(h.path, raw, 0o640)
+		tmp := h.path + ".tmp"
+		if os.WriteFile(tmp, raw, 0o640) == nil {
+			_ = os.Rename(tmp, h.path)
+		}
 	}
 }
 

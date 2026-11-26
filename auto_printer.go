@@ -46,7 +46,7 @@ const verbDeleteFile = string(connectorapi.VerbDeleteFile)
 func runPrinter(
 	ctx context.Context, printers devices, files lister, rule Rule, settings Settings, by string, now time.Time,
 ) (record RunRecord, skip error) {
-	record = RunRecord{At: now, By: by, Rule: rule.Name, DryRun: settings.dryRun}
+	record = RunRecord{At: now, By: by, Rule: rule.Name, Device: rule.Device, DryRun: settings.dryRun}
 
 	plan := printerPlan(ctx, printers, files, rule, "", now)
 	if plan.Error != "" {

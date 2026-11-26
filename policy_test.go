@@ -46,7 +46,24 @@ func call(t *testing.T, h http.Handler, principal, method, target, body string) 
 
 	path, query, _ := strings.Cut(target, "?")
 
-	r, err := routesapi.Request{Method: method, Path: path, Query: query, Body: []byte(body), Principal: principal}.HTTP(context.Background())
+	headers := map[string][]string{}
+	if method != http.MethodGet {
+		headers["Content-Type"] = []string{"application/json"}
+	}
+
+	// A save names the list it was made on, as the page does.
+	if method == http.MethodPut && path == "/rules" {
+		headers["If-Match"] = []string{`"` + versionFor(t, h, principal) + `"`}
+	}
+
+	return send(t, h, routesapi.Request{Method: method, Path: path, Query: query, Body: []byte(body), Principal: principal, Headers: headers})
+}
+
+// send hands one request to the module's routes as the host does.
+func send(t *testing.T, h http.Handler, req routesapi.Request) *httptest.ResponseRecorder {
+	t.Helper()
+
+	r, err := req.HTTP(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,6 +72,20 @@ func call(t *testing.T, h http.Handler, principal, method, target, body string) 
 	h.ServeHTTP(rec, r)
 
 	return rec
+}
+
+// versionFor is the rules_version the overview gives principal.
+func versionFor(t *testing.T, h http.Handler, principal string) string {
+	t.Helper()
+
+	rec := send(t, h, routesapi.Request{Method: http.MethodGet, Path: "/overview", Principal: principal})
+
+	var state State
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("overview: %v %s", err, rec.Body)
+	}
+
+	return state.RulesVersion
 }
 
 const snapshotRule = `{"id":"s","name":"Snapshots","enabled":true,"storage":"local","path":"camera","mode":"files","pattern":"*.jpg","keep_days":14}`
@@ -356,7 +387,12 @@ func TestPrinterRulesAreNarrow(t *testing.T) {
 }
 
 func TestAPrinterRuleNeedsOperateOnThatPrinterAndIsNeverAutomatic(t *testing.T) {
-	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
+	// anna may also delete in the storages: saving only the printer rule
+	// removes the default rules.
+	access := &fakeAccess{allow: map[string]bool{
+		"user:anna operate device/dev-1": true, "user:anna write_storage resource_kind/storage": true,
+		"user:anna observe device/dev-1": true,
+	}}
 	settings := Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}, AllowedDevices: []string{"dev-1"}}
 	m, h := newModule(t, settings, access)
 	m.files = copiesOf(fakePrinterOne())

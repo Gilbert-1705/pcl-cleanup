@@ -37,7 +37,12 @@ func autoPrinter(t *testing.T, change func(*Settings)) (*module, *fakePrinters, 
 		change(&settings)
 	}
 
-	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
+	// anna may also delete in the storages: saving only the printer rule
+	// removes the default rules.
+	access := &fakeAccess{allow: map[string]bool{
+		"user:anna operate device/dev-1": true, "user:anna write_storage resource_kind/storage": true,
+		"user:anna observe device/dev-1": true,
+	}}
 	m, h := newModule(t, checked(t, settings), access)
 
 	printers := usbPrinter()

@@ -146,5 +146,9 @@
   "history.dryRun": "Probelauf",
   "history.partial": "unvollständig",
   "history.listDeleted": "Gelöscht: {count, plural, one {# Datei} other {# Dateien}}",
-  "history.listWould": "Wäre gelöscht worden: {count, plural, one {# Datei} other {# Dateien}}"
+  "history.listWould": "Wäre gelöscht worden: {count, plural, one {# Datei} other {# Dateien}}",
+  "error.stale": "Jemand anderes hat die Regeln inzwischen geändert. Die Seite zeigt sie neu an; bitte die Änderung noch einmal vornehmen.",
+  "rule.badge.noAccess": "kein Zugriff",
+  "rule.hiddenText": "Eine Regel für einen Drucker, den du nicht sehen darfst. Die Einzelheiten sehen nur Personen, die diesen Drucker sehen dürfen.",
+  "history.hidden": "Einzelheiten verborgen, du darfst diesen Drucker nicht sehen"
 }

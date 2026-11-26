@@ -17,6 +17,18 @@ below are the setting keys and routes as they appear in `module.yaml` and
 - „Run due rules“ on the page: every active storage rule that has something to delete, planned again just before it deletes, with the rights of the signed-in person.
 - `ROADMAP.md`.
 
+### Security
+
+- The overview shows what comes from a printer only to a person who may observe that printer: printer rules of other printers come with their name only, marked hidden, and keep as they are when the list is saved; the files an automatic run deleted and why a rule was skipped come only with the printer. Who saved a rule comes only to a person who may delete where it points. The extension asks the server `observe` for this (`checks` in `module.yaml`).
+- Removing a rule takes the same right as changing it. `PUT /rules` needs the `rules_version` of the overview in `If-Match` (428 without, 412 when the rules changed meanwhile), and saves run one at a time.
+- A printer rule deletes only a path the printer reports directly in the rule's folder with a print file ending (also the FAT short forms `.bgc` and `.gco`), not only by the name it shows.
+- The copy of a print file may be at most 24 hours newer than the file on the printer. The README says what the copy check cannot do.
+- `PUT /rules`, `POST /runs` and `POST /auto/run` take `application/json` only (415 otherwise).
+- A folder rule with a pattern is refused (422); one stored by an earlier version loads without it.
+- The history is written through a file of its own and a rename.
+- Built against Prusa Connect Local v0.1.0-beta.2; `make core`, the CI and the Marketplace builder check the commit of the tag.
+- `minimatch` 11.0.9 for the lint tools (GHSA-g3hv-75wg-m249); it is not in the page bundle.
+
 ### Changed
 
 - The page is English with a German translation (`ui/src/locales/`), shown in the reader's language. Sizes and dates follow the reader's language. The texts in `module.yaml` are English.

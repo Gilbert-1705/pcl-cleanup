@@ -5,6 +5,11 @@ export interface Rule {
   id: string;
   name: string;
   enabled: boolean;
+  /**
+   * A printer rule the reader may not see in full: it comes with id, name and
+   * state only. Send it back unchanged; the server keeps the stored rule.
+   */
+  hidden?: boolean;
   /** 'storage' (the default) or 'printer' for a printer's own storage. */
   target?: 'storage' | 'printer';
   storage?: string;
@@ -70,6 +75,8 @@ export interface RunRecord {
 
 export interface State {
   rules: Rule[];
+  /** Names the stored rules; a save sends it back (writeRules). */
+  rules_version: string;
   /** The interval of the automatic printer run, when auto_interval is set. */
   interval?: string;
   next_run?: string;
@@ -118,11 +125,29 @@ const moduleBase = ((): string => {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const base = (_host: ModuleHost): string => moduleBase;
 
-const call = async <T>(host: ModuleHost, method: string, path: string, body?: unknown): Promise<T> => {
+/** An answer of the module that was not a success, with its HTTP status. */
+export class CallError extends Error {
+  constructor(
+    readonly status: number,
+    detail: string,
+  ) {
+    super(`${status}: ${detail}`);
+  }
+}
+
+// Every route that changes something takes JSON only, so a body is always
+// sent as JSON, an empty object where the route needs none.
+const call = async <T>(
+  host: ModuleHost,
+  method: string,
+  path: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> => {
   const init: RequestInit = { method, credentials: 'same-origin' };
-  if (body !== undefined) {
-    init.body = JSON.stringify(body);
-    init.headers = { 'Content-Type': 'application/json' };
+  if (method !== 'GET') {
+    init.body = JSON.stringify(body ?? {});
+    init.headers = { ...headers, 'Content-Type': 'application/json' };
   }
 
   const response = await fetch(`${base(host)}${path}`, init);
@@ -135,7 +160,7 @@ const call = async <T>(host: ModuleHost, method: string, path: string, body?: un
     } catch {
       // Not JSON: the text itself is the message.
     }
-    throw new Error(`${response.status}: ${detail}`);
+    throw new CallError(response.status, detail);
   }
 
   return (text ? JSON.parse(text) : undefined) as T;
@@ -143,8 +168,16 @@ const call = async <T>(host: ModuleHost, method: string, path: string, body?: un
 
 export const readState = (host: ModuleHost): Promise<State> => call(host, 'GET', '/overview');
 
-export const writeRules = (host: ModuleHost, rules: Rule[]): Promise<Rule[]> =>
-  call(host, 'PUT', '/rules', rules);
+/**
+ * Saves the rules, made on the list the overview named with version. A list
+ * that changed since answers 412 (CallError).
+ */
+export const writeRules = (
+  host: ModuleHost,
+  rules: Rule[],
+  version: string,
+): Promise<{ rules: Rule[]; rules_version: string }> =>
+  call(host, 'PUT', '/rules', rules, { 'If-Match': `"${version}"` });
 
 export const readPlans = async (host: ModuleHost): Promise<RulePlan[]> =>
   (await call<{ plans: RulePlan[] }>(host, 'GET', '/plan')).plans;

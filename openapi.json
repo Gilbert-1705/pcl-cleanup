@@ -10,7 +10,7 @@
       "put": {
         "operationId": "write-rules",
         "summary": "Replace the rules",
-        "description": "Checks and keeps the whole list of rules. A storage rule names a folder below the root of a storage in allowed_storages. A printer rule names a printer in allowed_devices, a folder on its storage and a pattern for print files, and only runs by hand. Every new or changed rule is checked against the signed-in person's own rights (write_storage on storages, operate on the printer) and remembers that person; an unchanged rule keeps its author. Refused with 403 when the person may not delete there and with 422 when the rule is outside the operator's lists. The host takes operate_resource on the module's instance before this is called.",
+        "description": "Checks and keeps the whole list of rules, made on the list GET /overview named: send its rules_version in If-Match. A storage rule names a folder below the root of a storage in allowed_storages; a folder rule takes no pattern. A printer rule names a printer in allowed_devices, a folder on its storage and a pattern for print files. Every new or changed rule, and every rule left out of the list, is checked against the signed-in person's own rights (write_storage on storages, operate on the printer); a new or changed rule remembers that person, an unchanged rule keeps its author. A rule sent back as hidden keeps the stored rule unchanged. Refused with 428 without If-Match, 412 when the rules changed since they were read, 415 for a body that is not application/json, 403 when the person may not delete there and 422 for a rule that is not usable or is outside the operator's lists. The host takes operate_resource on the module's instance before this is called.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -22,6 +22,15 @@
                 }
               }
             }
+          },
+          "412": {
+            "description": "The rules changed since they were read."
+          },
+          "415": {
+            "description": "The body is not application/json."
+          },
+          "428": {
+            "description": "If-Match is missing."
           }
         },
         "requestBody": {
@@ -36,14 +45,25 @@
               }
             }
           }
-        }
+        },
+        "parameters": [
+          {
+            "name": "If-Match",
+            "in": "header",
+            "required": true,
+            "description": "The rules_version of GET /overview, in quotes.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ]
       }
     },
     "/plan": {
       "get": {
         "operationId": "read-plan",
         "summary": "What the rules would delete now",
-        "description": "Scans the folders the rules cover, with the signed-in person's rights, and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. A printer rule is read only when asked for alone (lazy in the overview), never while the printer prints, never offers the file of the current or the last print, and by default offers a file only if a copy with the same name and size lies in the rule's copy folder (kept_no_copy counts the others). The host takes view_resource on the module's instance before this is called.",
+        "description": "Scans the folders the rules cover, with the signed-in person's rights, and answers per rule how many units, files and bytes it holds and would delete. With rule, the answer for that rule also lists the paths to delete, at most 3000. A printer rule is read only when asked for alone (lazy in the overview), never while the printer prints, never offers the file of the current or the last print, and by default offers a file only if a copy with the same name and size lies in the rule's copy folder (kept_no_copy counts the others). The host takes view_resource on the module's instance before this is called. A printer rule on a printer the person may not observe comes without its printer and path, with an error that says it is hidden.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -154,7 +174,7 @@
       "post": {
         "operationId": "record-run",
         "summary": "Record a cleanup the page did",
-        "description": "The page deletes with the signed-in person's rights and reports the result here, so the history lists it. Refused with 422 for a rule that does not exist, negative counts or a rule name longer than 80. The host takes operate_resource on the module's instance before this is called.",
+        "description": "The page deletes with the signed-in person's rights and reports the result here, so the history lists it. Refused with 422 for a rule that does not exist, negative counts or a rule name longer than 80. The host takes operate_resource on the module's instance before this is called. Takes a body of type application/json only.",
         "responses": {
           "201": {
             "description": "The answer.",
@@ -166,6 +186,9 @@
                 }
               }
             }
+          },
+          "415": {
+            "description": "The body is not application/json."
           }
         },
         "requestBody": {
@@ -187,7 +210,7 @@
       "post": {
         "operationId": "run-now",
         "summary": "Run the active printer rules now",
-        "description": "Runs the active printer rules as the schedule does, as the module itself, each rule only while the person who saved it may still operate that printer. Storage rules never run here: the page runs them with the person's own rights. Refused with 409 unless printer_auto and auto_interval are set. The host takes operate_resource on the module's instance before this is called.",
+        "description": "Runs the active printer rules as the schedule does, as the module itself, each rule only while the person who saved it may still operate that printer. Storage rules never run here: the page runs them with the person's own rights. Refused with 409 unless printer_auto and auto_interval are set. The host takes operate_resource on the module's instance before this is called. Takes a body of type application/json only.",
         "responses": {
           "200": {
             "description": "The answer.",
@@ -199,6 +222,19 @@
                 }
               }
             }
+          },
+          "415": {
+            "description": "The body is not application/json."
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
           }
         }
       }
@@ -207,7 +243,7 @@
       "get": {
         "operationId": "read-overview",
         "summary": "The rules, the schedule and the last runs",
-        "description": "Every rule, the interval of the automatic printer run and when it runs next, why the last automatic run skipped a rule, the operator's allowed storages and printers, the settings of the automatic printer run, and the last thirty runs. The host takes view_resource on the module's instance before this is called.",
+        "description": "Every rule, the interval of the automatic printer run and when it runs next, why the last automatic run skipped a rule, the operator's allowed storages and printers, the settings of the automatic printer run, and the last thirty runs. The host takes view_resource on the module's instance before this is called. What comes from a printer or names one is shown only to a person who may observe that printer: a printer rule they may not see comes with id, name, target and state only, marked hidden; a run on such a printer comes without its files; who saved a rule comes only to a person who may delete where it points. rules_version names the stored rules for PUT /rules.",
         "responses": {
           "200": {
             "description": "The answer.",

@@ -32,6 +32,18 @@ page, with the rights of the person who starts them.
 - Folder rules delete the files of a folder first and then the empty folder,
   if the call deletes only empty folders.
 
+## A copy check by checksum
+
+**Waits for:** a way for a module to learn which server file a print file on
+a printer came from, for example by reading the host's transfer records
+(source storage and path, with the file's SHA-256), or a checksum of a file
+on a printer.
+
+Today a printer rule takes a file on the server as its copy when name and size
+match and the copy is not much newer (README, “What the copy check cannot
+do”). With the origin of a print file known, the rule could instead require
+that the very file it was sent from is still there, unchanged.
+
 ## Smaller items
 
 - More translations of the page. See [Translations](README.md#translations).

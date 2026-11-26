@@ -28,7 +28,7 @@ jobs:
     with:
       path: .
       bundle-command: make ui-build
-      core-ref: v0.1.0-beta.1
+      core-ref: v0.1.0-beta.2 # as CORE_COMMIT in the Makefile; make ui-build checks the commit (CORE_SHA)
       dry-run: true
     permissions:
       contents: read

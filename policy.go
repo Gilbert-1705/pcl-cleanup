@@ -119,7 +119,8 @@ func mayDelete(ctx context.Context, access checker, person string, rule Rule) er
 // adopt merges the rules a person saves with the rules kept so far. A rule
 // that is unchanged keeps its author and is not checked again. A new or
 // changed rule has to pass the operator's lists and the person's rights, and
-// gets the person as its author.
+// gets the person as its author. A kept rule that is missing from the saved
+// list is removed only if the person may delete where it points.
 func adopt(ctx context.Context, access checker, settings Settings, person string, kept, saved []Rule) ([]Rule, error) {
 	before := map[string]Rule{}
 	for _, rule := range kept {
@@ -150,6 +151,23 @@ func adopt(ctx context.Context, access checker, settings Settings, person string
 
 		rule.SavedBy = person
 		out[i] = rule
+	}
+
+	// A rule that is left out is removed. That takes the same right as
+	// changing it, so nobody removes a rule they could not have saved.
+	still := map[string]bool{}
+	for _, rule := range out {
+		still[rule.ID] = true
+	}
+
+	for _, rule := range kept {
+		if still[rule.ID] {
+			continue
+		}
+
+		if err := mayDelete(ctx, access, person, rule); err != nil {
+			return nil, fmt.Errorf("removing %s: %w", rule.Name, err)
+		}
 	}
 
 	return out, nil

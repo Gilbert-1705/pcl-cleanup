@@ -14,7 +14,16 @@ import (
 // A printer rule deletes a print file off a printer only while the same file
 // lies in one of the server's storages, so nothing is lost that cannot be
 // sent again. "The same" is the long name, case aside, and the size in bytes:
-// both have to match. The printer reports the long name as DisplayName, and a
+// both have to match. And the copy may not be much newer than the file on the
+// printer: a real copy was uploaded before it was sent to the printer, so a
+// copy that appeared later is more likely another file of the same name and
+// size than the one the print came from. copyTolerance allows for printer
+// clocks and FAT times without a time zone.
+//
+// The module protocol gives no checksum of a file on a printer, and no way to
+// read one, so the content itself cannot be compared. Whoever may write to
+// copy_storage can therefore make a file there look like a copy; README
+// says so. The printer reports the long name as DisplayName, and a
 // FAT short name such as PRINT~1.BGC as Name; the short name is used only when
 // there is no long one.
 //
@@ -26,6 +35,9 @@ import (
 // errCopiesCut is a copy storage that was read only in part.
 var errCopiesCut = errors.New("the storage with the copies was read only in part, so nothing is deleted")
 
+// copyTolerance is how much newer than the file on the printer a copy may be.
+const copyTolerance = 24 * time.Hour
+
 // copyKey is what a print file and its copy have to share.
 type copyKey struct {
 	name string
@@ -36,14 +48,21 @@ func keyOf(name string, size int64) copyKey {
 	return copyKey{name: strings.ToLower(path.Base(strings.TrimSpace(name))), size: size}
 }
 
-// copySet lists the files under CopyPath in CopyStorage, for person.
-func copySet(ctx context.Context, files lister, rule Rule, person string) (map[copyKey]bool, error) {
+// copySet lists the files under CopyPath in CopyStorage, for person, with
+// the oldest modification time of each name and size. A copy without a time
+// is left out: it could not be compared with the file on the printer.
+func copySet(ctx context.Context, files lister, rule Rule, person string) (map[copyKey]time.Time, error) {
 	w := &walker{files: files, storage: rule.CopyStorage, principal: person}
-	set := map[copyKey]bool{}
+	set := map[copyKey]time.Time{}
 
 	err := w.walk(ctx, rule.CopyPath, func(e entry) {
-		if e.Size > 0 {
-			set[keyOf(e.Path, e.Size)] = true
+		if e.Size <= 0 || e.MTime.IsZero() {
+			return
+		}
+
+		key := keyOf(e.Path, e.Size)
+		if old, ok := set[key]; !ok || e.MTime.Before(old) {
+			set[key] = e.MTime
 		}
 	})
 
@@ -73,12 +92,19 @@ func markCopies(ctx context.Context, files lister, rule Rule, person string, uni
 	}
 
 	for i := range units {
-		if units[i].Size <= 0 || !set[keyOf(units[i].Name, units[i].Size)] {
+		copied, ok := set[keyOf(units[i].Name, units[i].Size)]
+		if units[i].Size <= 0 || !ok || !copyFits(copied, units[i].Newest) {
 			units[i].NoCopy = true
 		}
 	}
 
 	return nil
+}
+
+// copyFits reports whether a copy written at copied can be the one a file
+// on the printer, written at printed, came from.
+func copyFits(copied, printed time.Time) bool {
+	return !copied.IsZero() && !printed.IsZero() && !copied.After(printed.Add(copyTolerance))
 }
 
 // anyCandidate reports whether the age and count limits alone would delete

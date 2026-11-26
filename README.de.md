@@ -4,7 +4,7 @@
 
 Eine Erweiterung für [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), den selbst betriebenen Prusa-Connect-Server. Prusa Connect Local löscht von sich aus nichts: Die Kamera schreibt laufend Snapshots, eine Zeitraffer-Erweiterung legt je Druck einen Ordner an, und andere Erweiterungen speichern ebenfalls Bilder. Diese Erweiterung löscht solche Dateien nach Regeln je Ordner. Bevor etwas gelöscht wird, zeigt sie, was weg würde, wie der Speicher belegt ist und was zuletzt gelöscht wurde.
 
-Stand: 0.5.0, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.1**. Die Seite ist englisch mit deutscher Übersetzung; Prusa Connect Local zeigt die Sprache der lesenden Person. Pläne für spätere Versionen stehen in [ROADMAP.md](ROADMAP.md).
+Stand: 0.5.0, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.2**; die Go-Tests laufen auch gegen v0.1.0-beta.1. Die Seite ist englisch mit deutscher Übersetzung; Prusa Connect Local zeigt die Sprache der lesenden Person. Pläne für spätere Versionen stehen in [ROADMAP.md](ROADMAP.md).
 
 ## Was sie macht
 
@@ -54,7 +54,7 @@ Eine Drucker-Regel nennt einen Drucker, einen Ordner auf seinem Speicher (zum Be
 
 Eine Drucker-Regel kann nur die neuesten N Druckdateien behalten (`keep_newest`), ohne Altersgrenze (`keep_days: 0`, nur bei Drucker-Regeln und nur mit `keep_newest` von mindestens 1). Neue Drucker-Regeln beginnen mit den neuesten 10.
 
-Ab Werk **löscht eine Drucker-Regel eine Datei nur, wenn dieselbe Datei in einem Speicher des Servers liegt**: gleicher langer Dateiname (ohne Rücksicht auf Groß- und Kleinschreibung) und gleiche Größe in Byte, im Speicher `copy_storage` unter dem Ordner `copy_path` und seinen Unterordnern (leer: der ganze Speicher). Das ist normalerweise bei Dateien der Fall, die über Connect Local an den Drucker gingen. Den Ordner wählst du auf der Seite aus einer Liste.
+Ab Werk **löscht eine Drucker-Regel eine Datei nur, wenn dieselbe Datei in einem Speicher des Servers liegt**: gleicher langer Dateiname (ohne Rücksicht auf Groß- und Kleinschreibung) und gleiche Größe in Byte, im Speicher `copy_storage` unter dem Ordner `copy_path` und seinen Unterordnern (leer: der ganze Speicher). Außerdem darf die Kopie höchstens 24 Stunden neuer sein als die Datei auf dem Drucker: Eine echte Kopie wurde hochgeladen, bevor sie zum Drucker ging; eine Datei, die erst danach auftauchte, ist eher eine andere mit gleichem Namen und gleicher Größe. Die 24 Stunden fangen Druckeruhren und FAT-Zeiten ohne Zeitzone ab. Das ist normalerweise bei Dateien der Fall, die über Connect Local an den Drucker gingen. Den Ordner wählst du auf der Seite aus einer Liste.
 
 - Eine Datei **ohne** solche Kopie (etwa direkt aus dem Slicer auf den Stick kopiert) zählt trotzdem zu den neuesten N, wird aber nie gelöscht. Sonst rückten ältere Dateien mit Kopie nach und gingen stattdessen. Die Vorschau listet diese Dateien gesondert.
 - Lassen sich die Kopien nicht vollständig lesen (Speicher nicht lesbar, Ordner fehlt, Durchlauf an seiner Grenze abgeschnitten), wird **nichts** gelöscht.
@@ -62,6 +62,8 @@ Ab Werk **löscht eine Drucker-Regel eine Datei nur, wenn dieselbe Datei in eine
 - Für eine Regel, die von Hand läuft, lässt sich der Kopie-Abgleich abschalten (`skip_copy_check`). Eine aktive Regel prüft immer.
 
 Der Kopie-Speicher muss in `allowed_storages` stehen.
+
+**Was der Kopie-Abgleich nicht kann.** Verglichen werden nur Name, Größe und Zeit. Das Modulprotokoll liefert keine Prüfsumme einer Datei auf dem Drucker und keine Möglichkeit, sie zu lesen; der Inhalt selbst wird also nicht verglichen. Wer auf `copy_storage` schreiben darf, kann deshalb eine Datei mit gleichem Namen und gleicher Größe ablegen, eine Druckdatei auf dem Drucker damit als gesichert erscheinen lassen, und eine Drucker-Regel löscht sie dann womöglich. Als Kopie-Speicher nur einen wählen, auf den ausschließlich vertrauenswürdige Personen schreiben dürfen. Ein Abgleich per Prüfsumme steht in der [Roadmap](ROADMAP.md).
 
 ### Automatisches Aufräumen am Drucker
 
@@ -99,7 +101,7 @@ Unter Einstellungen → Erweiterungen → Cleanup. Die Beschreibungen dort sind 
 | `printer_auto_max` | `50` | Höchstens so viele Dateien je Drucker-Regel und automatischem Lauf, 1 bis 500. |
 | `printer_auto_dry_run` | `true` | Der automatische Drucker-Lauf schreibt nur auf, was er löschen würde. |
 
-Rechte, um die das Modul bittet: `read_storage` und ein eigener Datenordner (`regeln.json`, `verlauf.json`). Es meldet keine Netzwerkverbindung an (`egress`). Auf Druckern hat es nichts, solange die Administration ihm für den automatischen Drucker-Lauf nicht die Operator-Rolle gibt. Außerdem stellt es dem Server zwei Fragen, nach denen es selbst nie handelt (`checks: write_storage, operate`), auch für Personen, die gerade nicht angemeldet sind (`check_absent_people`). Siehe unten.
+Rechte, um die das Modul bittet: `read_storage` und ein eigener Datenordner (`regeln.json`, `verlauf.json`). Es meldet keine Netzwerkverbindung an (`egress`). Auf Druckern hat es nichts, solange die Administration ihm für den automatischen Drucker-Lauf nicht die Operator-Rolle gibt. Außerdem stellt es dem Server drei Fragen, nach denen es selbst nie handelt (`checks: write_storage, operate, observe`), auch für Personen, die gerade nicht angemeldet sind (`check_absent_people`). Siehe unten.
 
 ### Berechtigungen
 
@@ -108,11 +110,15 @@ Prusa Connect Local schützt die Routen des Moduls: Lesen (`GET`) braucht `view_
 1. **Die Listen der Administration.** Regeln dürfen nur auf die Speicher in `allowed_storages` und die Drucker in `allowed_devices` zeigen. Ändern kann sie nur, wer die Erweiterung konfigurieren darf.
 2. **Die eigenen Rechte der Person.** Speichert jemand eine neue oder geänderte Regel, fragt das Modul den Server, ob diese Person dort löschen darf (`write_storage` bei Speichern, `operate` am Drucker), und lehnt die Regel sonst ab. Die Regel merkt sich, wer sie gespeichert hat. Vor jedem automatischen Drucker-Lauf fragt das Modul für diese Person erneut und lässt die Regel aus, wenn sie den Drucker nicht mehr bedienen darf oder der Server nicht antwortet. Die Seite zeigt, warum eine Regel ausgelassen wurde.
 
+Eine Regel zu entfernen braucht dasselbe Recht, wie sie zu ändern; niemand entfernt also eine Regel, die er nicht hätte speichern können. Beim Speichern nennt die Seite die Liste, auf der sie aufbaut (`If-Match` mit der `rules_version` der Übersicht); hat inzwischen jemand anderes gespeichert, wird abgelehnt und die Seite lädt die neue Liste.
+
+**Wer was sieht.** Wer die Erweiterung öffnen darf, sieht die Speicher-Regeln, die Belegung und den Verlauf des Aufräumens von Hand. Was von einem Drucker kommt oder ihn nennt, sieht nur, wer diesen Drucker sehen darf (`observe`): die Drucker-Regel selbst, die Dateien, die ein automatischer Lauf dort gelöscht hat, und warum ein Lauf sie ausgelassen hat. Alle anderen sehen die Regel nur mit Namen, markiert als „kein Zugriff“, und können die übrigen Regeln trotzdem speichern. Wer eine Regel gespeichert hat, sieht nur, wer dort löschen darf. Antwortet der Server nicht, wird davon nichts gezeigt.
+
 Eine Regel, die noch niemand gespeichert hat, etwa eine voreingestellte, hat keine Autorin und keinen Autor. Sie funktioniert von Hand, eine Drucker-Regel läuft aber erst von selbst, nachdem jemand mit dem Recht, diesen Drucker zu bedienen, sie einmal gespeichert hat.
 
 Grenzen, die man kennen sollte:
 
-- In Prusa Connect Local v0.1.0-beta.1 gilt `write_storage` für alle Speicher zusammen, nicht je Speicher. Erst `allowed_storages` grenzt auf einzelne Speicher ein.
+- Bis Prusa Connect Local v0.1.0-beta.2 gilt `write_storage` für alle Speicher zusammen, nicht je Speicher. Erst `allowed_storages` grenzt auf einzelne Speicher ein.
 - Gelesen wird auf der Seite (Vorschau, Belegung, Ordner) mit den Rechten der angemeldeten Person. Der automatische Drucker-Lauf liest Speicher mit dem eigenen `read_storage` des Moduls und Drucker nur mit der Operator-Rolle, die die Administration ihm gegeben hat (siehe oben).
 
 ## Installation
@@ -134,12 +140,12 @@ Prusa Connect Local erkennt ein Update nur an der Version; jede Änderung hebt s
 ## Bauen
 
 ```sh
-make core      # Prusa Connect Local v0.1.0-beta.1 nach .core holen und die Bibliotheken bauen
+make core      # Prusa Connect Local v0.1.0-beta.2 nach .core holen, Commit prüfen, Bibliotheken bauen
 make test      # Go-Tests und svelte-check
 make release   # release/cleanup/ und release/cleanup-<version>.tar.gz
 ```
 
-Braucht Go 1.26, Node 22, pnpm 11 und git. `ui/pnpm-workspace.yaml` nimmt neue Paketversionen erst nach sieben Tagen an und indirekte Abhängigkeiten nur aus der Registry.
+Braucht Go 1.26, Node 22, pnpm 11 und git. `make core` bricht ab, wenn `.core` nicht auf dem Commit steht, den `CORE_SHA` nennt, denn ein Tag lässt sich verschieben; CI und Marketplace-Builder laufen durch dieselbe Prüfung. `ui/pnpm-workspace.yaml` nimmt neue Paketversionen erst nach sieben Tagen an und indirekte Abhängigkeiten nur aus der Registry.
 
 ## Übersetzungen
 
@@ -152,6 +158,7 @@ Die Texte der Seite liegen in `ui/src/locales/`: `en.json` ist die Quelle, `de.j
 | `main.go` | Start, die Routen des Moduls, der Zeitplan des Drucker-Laufs |
 | `rules.go` | Regeln, Voreinstellungen, Prüfung |
 | `policy.go` | die Listen der Administration und die Rechte der Person |
+| `visibility.go` | was die Übersicht einer Person zeigt |
 | `plan.go` | was eine Regel jetzt löschen würde, Speicherbelegung |
 | `printer.go` | Drucker-Regeln: den Speicher eines Druckers lesen |
 | `copies.go` | Drucker-Regeln: die Kopien auf dem Server, die Ordnerliste |
@@ -164,7 +171,7 @@ Routen unter `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`:
 | Route | Zweck |
 |---|---|
 | `GET /overview` | Regeln, Einstellungen, Verlauf |
-| `PUT /rules` | Regeln speichern (gegen die Rechte der Person geprüft) |
+| `PUT /rules` | Regeln speichern (mit `If-Match`, gegen die Rechte der Person geprüft) |
 | `GET /plan?rule=…` | was eine Regel jetzt löschen würde (eine Drucker-Regel nur einzeln angefragt) |
 | `GET /usage?storage=…` | Belegung je Ordner der obersten Ebene |
 | `GET /folders?storage=…&path=…` | die Ordner eine Ebene unter einem Pfad, für die Wahl des Kopie-Ordners |

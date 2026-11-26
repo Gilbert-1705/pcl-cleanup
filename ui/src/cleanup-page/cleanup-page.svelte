@@ -12,6 +12,7 @@
   import {
     allowed,
     bytes,
+    CallError,
     deletePaths,
     deletePrinterFiles,
     type Folders,
@@ -347,15 +348,23 @@
           };
   };
 
+  // Saves the list made on the version the overview gave. When somebody else
+  // saved in between, the server refuses, and the page loads the new list.
   const saveRules = async (rules: Rule[]): Promise<boolean> => {
     try {
-      await writeRules(host, rules);
+      await writeRules(host, rules, current?.rules_version ?? '');
       await load();
       await scan();
 
       return true;
     } catch (error) {
-      problem = t('error.save', { detail: String(error) });
+      if (error instanceof CallError && error.status === 412) {
+        problem = t('error.stale');
+        await load();
+        await scan();
+      } else {
+        problem = t('error.save', { detail: String(error) });
+      }
 
       return false;
     }
@@ -369,8 +378,10 @@
       keep_newest: Number(editing.keep_newest ?? 0),
       depth: editing.mode === 'folders' ? Number(editing.depth ?? 1) : 0,
     };
-    // The server sets saved_by, never the page.
+    // The server sets saved_by, never the page. A folder rule judges whole
+    // folders and takes no pattern.
     delete rule.saved_by;
+    if (rule.target !== 'printer' && rule.mode === 'folders') delete rule.pattern;
     if (!rule.skip_copy_check) delete rule.skip_copy_check;
     const rules = [...current.rules];
     if (editingIndex >= 0) rules[editingIndex] = rule;
@@ -530,118 +541,128 @@
         <ul class="flex flex-col gap-3">
           {#each current.rules as rule, index (rule.id)}
             {@const plan = plans[rule.id]}
-            <li class="flex flex-col gap-2 border-b border-border pb-3">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="font-medium">{rule.name}</span>
-                {#if rule.target === 'printer' && !rule.enabled}
-                  <Badge variant="secondary">{t('rule.badge.manualOnly')}</Badge>
-                {:else if rule.target === 'printer'}
-                  <Badge variant="success">{t('rule.badge.active')}</Badge>
-                  {#if current.printer_auto_dry_run}<Badge variant="warning">{t('rule.badge.dryRun')}</Badge>{/if}
-                {:else}
-                  <Badge variant={rule.enabled ? 'success' : 'secondary'}>
-                    {rule.enabled ? t('rule.badge.active') : t('rule.badge.off')}
-                  </Badge>
-                {/if}
-                <span class="text-xs text-muted-foreground">
-                  {t('rule.place', { where: describeWhere(rule), what: describeWhat(rule) })}
-                </span>
-              </div>
-              <p class="text-sm text-muted-foreground">{describeDelete(rule)}</p>
-              {#if rule.target === 'printer' && rule.enabled && !current.printer_auto}
-                <p class="text-sm text-warning-text">{t('rule.printerAutoOff')}</p>
-              {/if}
-              {#if current.skipped?.[rule.id]}
-                <p class="text-sm text-warning-text">{t('rule.skipped', { reason: current.skipped[rule.id] ?? '' })}</p>
-              {/if}
-
-              {#if plan?.error}
-                <p class="text-sm text-destructive-text">{plan.error}</p>
-              {:else if plan?.lazy}
-                <p class="text-sm text-muted-foreground">{t('plan.notRead')}</p>
-              {:else if plan}
-                <p class="text-sm">
-                  {t('plan.size', { units: unitsOf(rule, plan.units), size: bytes(plan.size) })}
-                  {#if plan.oldest && when(plan.oldest)}· {t('plan.oldest', { date: when(plan.oldest) })}{/if}
-                  · <strong>{t('plan.toDelete', { count: plan.delete_units, size: bytes(plan.delete_size) })}</strong>
-                  {#if plan.truncated}· {t('plan.truncated')}{/if}
-                </p>
-                {#if rule.target === 'printer'}
-                  <ul class="text-sm text-muted-foreground">
-                    <li>{t('plan.keptNewest', { count: Math.min(rule.keep_newest ?? 0, plan.units) })}</li>
-                    {#if plan.copy_check}
-                      <li>
-                        {plan.kept_no_copy
-                          ? t('plan.keptNoCopySize', { count: plan.kept_no_copy, size: bytes(plan.kept_no_copy_size ?? 0) })
-                          : t('plan.keptNoCopy', { count: 0 })}
-                      </li>
-                    {/if}
-                    <li>{t('plan.deleteCount', { count: plan.delete_units })}</li>
-                  </ul>
-                  {#if plan.kept_no_copy_list?.length}
-                    <details class="text-sm">
-                      <summary class="cursor-pointer text-muted-foreground">{t('plan.noCopyList')}</summary>
-                      <ul class="mt-1 max-h-48 overflow-auto">
-                        {#each plan.kept_no_copy_list as name (name)}<li>{name}</li>{/each}
-                      </ul>
-                    </details>
+            {#if rule.hidden}
+              <li class="flex flex-col gap-1 border-b border-border pb-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium">{rule.name}</span>
+                  <Badge variant="secondary">{t('rule.badge.noAccess')}</Badge>
+                </div>
+                <p class="text-sm text-muted-foreground">{t('rule.hiddenText')}</p>
+              </li>
+            {:else}
+              <li class="flex flex-col gap-2 border-b border-border pb-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium">{rule.name}</span>
+                  {#if rule.target === 'printer' && !rule.enabled}
+                    <Badge variant="secondary">{t('rule.badge.manualOnly')}</Badge>
+                  {:else if rule.target === 'printer'}
+                    <Badge variant="success">{t('rule.badge.active')}</Badge>
+                    {#if current.printer_auto_dry_run}<Badge variant="warning">{t('rule.badge.dryRun')}</Badge>{/if}
+                  {:else}
+                    <Badge variant={rule.enabled ? 'success' : 'secondary'}>
+                      {rule.enabled ? t('rule.badge.active') : t('rule.badge.off')}
+                    </Badge>
                   {/if}
+                  <span class="text-xs text-muted-foreground">
+                    {t('rule.place', { where: describeWhere(rule), what: describeWhat(rule) })}
+                  </span>
+                </div>
+                <p class="text-sm text-muted-foreground">{describeDelete(rule)}</p>
+                {#if rule.target === 'printer' && rule.enabled && !current.printer_auto}
+                  <p class="text-sm text-warning-text">{t('rule.printerAutoOff')}</p>
                 {/if}
-              {:else if scanning}
-                <p class="text-sm text-muted-foreground">{t('page.scanning')}</p>
-              {/if}
+                {#if current.skipped?.[rule.id]}
+                  <p class="text-sm text-warning-text">{t('rule.skipped', { reason: current.skipped[rule.id] ?? '' })}</p>
+                {/if}
 
-              <div class="flex flex-wrap gap-2">
-                {#if rule.target === 'printer'}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={reading !== '' || busyRule !== ''}
-                    pending={reading === rule.id}
-                    onclick={() => void readPrinter(rule)}
-                  >
-                    {t('rule.readPrinter')}
-                  </Button>
+                {#if plan?.error}
+                  <p class="text-sm text-destructive-text">{plan.error}</p>
+                {:else if plan?.lazy}
+                  <p class="text-sm text-muted-foreground">{t('plan.notRead')}</p>
+                {:else if plan}
+                  <p class="text-sm">
+                    {t('plan.size', { units: unitsOf(rule, plan.units), size: bytes(plan.size) })}
+                    {#if plan.oldest && when(plan.oldest)}· {t('plan.oldest', { date: when(plan.oldest) })}{/if}
+                    · <strong>{t('plan.toDelete', { count: plan.delete_units, size: bytes(plan.delete_size) })}</strong>
+                    {#if plan.truncated}· {t('plan.truncated')}{/if}
+                  </p>
+                  {#if rule.target === 'printer'}
+                    <ul class="text-sm text-muted-foreground">
+                      <li>{t('plan.keptNewest', { count: Math.min(rule.keep_newest ?? 0, plan.units) })}</li>
+                      {#if plan.copy_check}
+                        <li>
+                          {plan.kept_no_copy
+                            ? t('plan.keptNoCopySize', { count: plan.kept_no_copy, size: bytes(plan.kept_no_copy_size ?? 0) })
+                            : t('plan.keptNoCopy', { count: 0 })}
+                        </li>
+                      {/if}
+                      <li>{t('plan.deleteCount', { count: plan.delete_units })}</li>
+                    </ul>
+                    {#if plan.kept_no_copy_list?.length}
+                      <details class="text-sm">
+                        <summary class="cursor-pointer text-muted-foreground">{t('plan.noCopyList')}</summary>
+                        <ul class="mt-1 max-h-48 overflow-auto">
+                          {#each plan.kept_no_copy_list as name (name)}<li>{name}</li>{/each}
+                        </ul>
+                      </details>
+                    {/if}
+                  {/if}
+                {:else if scanning}
+                  <p class="text-sm text-muted-foreground">{t('page.scanning')}</p>
                 {/if}
-                <ConfirmDialog
-                  title={t('rule.cleanTitle', { rule: rule.name })}
-                  description={confirmText(rule, plan)}
-                  confirmLabel={t('rule.confirmDelete')}
-                  variant="destructive"
-                  onConfirm={() => void clean(rule)}
-                >
-                  {#snippet trigger({ props })}
+
+                <div class="flex flex-wrap gap-2">
+                  {#if rule.target === 'printer'}
                     <Button
-                      {...props}
-                      variant="destructive"
+                      variant="secondary"
                       size="sm"
-                      disabled={busyRule !== '' ||
-                        (plan !== undefined && (plan.lazy || Boolean(plan.error) || plan.delete_units === 0))}
-                      pending={busyRule === rule.id}
+                      disabled={reading !== '' || busyRule !== ''}
+                      pending={reading === rule.id}
+                      onclick={() => void readPrinter(rule)}
                     >
-                      {t('rule.cleanNow')}
+                      {t('rule.readPrinter')}
                     </Button>
-                  {/snippet}
-                </ConfirmDialog>
-                {#if rule.target !== 'printer' || rule.enabled || (current.printer_auto && !rule.skip_copy_check)}
-                  <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
-                    {rule.enabled ? t('rule.turnOff') : t('rule.turnOn')}
-                  </Button>
-                {/if}
-                <Button variant="ghost" size="sm" onclick={() => startEdit(index)}>{t('rule.edit')}</Button>
-                <ConfirmDialog
-                  title={t('rule.removeTitle')}
-                  description={t('rule.removeText', { rule: rule.name })}
-                  confirmLabel={t('rule.remove')}
-                  variant="destructive"
-                  onConfirm={() => void removeRule(index)}
-                >
-                  {#snippet trigger({ props })}
-                    <Button {...props} variant="ghost" size="sm">{t('rule.remove')}</Button>
-                  {/snippet}
-                </ConfirmDialog>
-              </div>
-            </li>
+                  {/if}
+                  <ConfirmDialog
+                    title={t('rule.cleanTitle', { rule: rule.name })}
+                    description={confirmText(rule, plan)}
+                    confirmLabel={t('rule.confirmDelete')}
+                    variant="destructive"
+                    onConfirm={() => void clean(rule)}
+                  >
+                    {#snippet trigger({ props })}
+                      <Button
+                        {...props}
+                        variant="destructive"
+                        size="sm"
+                        disabled={busyRule !== '' ||
+                          (plan !== undefined && (plan.lazy || Boolean(plan.error) || plan.delete_units === 0))}
+                        pending={busyRule === rule.id}
+                      >
+                        {t('rule.cleanNow')}
+                      </Button>
+                    {/snippet}
+                  </ConfirmDialog>
+                  {#if rule.target !== 'printer' || rule.enabled || (current.printer_auto && !rule.skip_copy_check)}
+                    <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
+                      {rule.enabled ? t('rule.turnOff') : t('rule.turnOn')}
+                    </Button>
+                  {/if}
+                  <Button variant="ghost" size="sm" onclick={() => startEdit(index)}>{t('rule.edit')}</Button>
+                  <ConfirmDialog
+                    title={t('rule.removeTitle')}
+                    description={t('rule.removeText', { rule: rule.name })}
+                    confirmLabel={t('rule.remove')}
+                    variant="destructive"
+                    onConfirm={() => void removeRule(index)}
+                  >
+                    {#snippet trigger({ props })}
+                      <Button {...props} variant="ghost" size="sm">{t('rule.remove')}</Button>
+                    {/snippet}
+                  </ConfirmDialog>
+                </div>
+              </li>
+            {/if}
           {/each}
         </ul>
 
@@ -925,7 +946,11 @@
               · {describeBy(run.by)}
               {#if run.dry_run}<Badge variant="secondary">{t('history.dryRun')}</Badge>{/if}
               {#if run.partial}<Badge variant="warning">{t('history.partial')}</Badge>{/if}
-              {#if run.error}<span class="text-destructive-text"> · {run.error}</span>{/if}
+              {#if run.error}
+                <span class="text-destructive-text">
+                  · {run.error.startsWith('hidden:') ? t('history.hidden') : run.error}
+                </span>
+              {/if}
               {#if run.deleted?.length}
                 <details>
                   <summary class="cursor-pointer text-muted-foreground">

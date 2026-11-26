@@ -13,11 +13,14 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -128,6 +131,10 @@ type module struct {
 	settings Settings
 	rules    rulesFile
 	history  *history
+
+	// saving keeps two saves of the rules from running into each other: each
+	// one loads, checks and writes the list as a whole.
+	saving sync.Mutex
 
 	mu      sync.Mutex
 	usage   map[string]Usage
@@ -269,11 +276,14 @@ func (m *module) forgetUsage() {
 
 // State is what the page reads first.
 type State struct {
-	Rules    []Rule      `json:"rules"`
-	Interval string      `json:"interval"`
-	NextRun  time.Time   `json:"next_run,omitzero"`
-	Running  bool        `json:"running"`
-	History  []RunRecord `json:"history"`
+	Rules []Rule `json:"rules"`
+	// RulesVersion names the stored rules. PUT /rules has to send it back in
+	// If-Match, so a save made on an older list is refused.
+	RulesVersion string      `json:"rules_version"`
+	Interval     string      `json:"interval"`
+	NextRun      time.Time   `json:"next_run,omitzero"`
+	Running      bool        `json:"running"`
+	History      []RunRecord `json:"history"`
 	// Skipped is why the last automatic run left a rule out, by rule id.
 	Skipped map[string]string `json:"skipped,omitempty"`
 	// AllowedStorages and AllowedDevices are the operator's lists, so the page
@@ -294,7 +304,7 @@ func (m *module) routes() http.Handler {
 
 	// Not /state: the host keeps /api/v1/modules/<namespace>/state for the
 	// module's records and answers it itself.
-	mux.HandleFunc("GET /overview", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /overview", func(w http.ResponseWriter, r *http.Request) {
 		if m.history == nil {
 			answer(w, http.StatusServiceUnavailable, map[string]string{"error": "the module is still starting"})
 
@@ -303,14 +313,15 @@ func (m *module) routes() http.Handler {
 
 		rules, err := m.rules.load()
 		state := State{
-			Rules: rules, History: m.history.list(),
-			AllowedStorages: m.settings.AllowedStorages, AllowedDevices: m.settings.AllowedDevices,
-			PrinterAuto: m.settings.PrinterAuto, PrinterAutomatic: m.settings.printerAutomatic(),
+			AllowedStorages: m.settings.AllowedStorages,
+			PrinterAuto:     m.settings.PrinterAuto, PrinterAutomatic: m.settings.printerAutomatic(),
 			PrinterAutoMax: m.settings.printerMax, DryRun: m.settings.dryRun,
 		}
 
 		if err != nil {
 			state.Error = err.Error()
+		} else {
+			state.RulesVersion = rulesVersion(rules)
 		}
 
 		if m.settings.interval > 0 {
@@ -319,18 +330,26 @@ func (m *module) routes() http.Handler {
 
 		m.mu.Lock()
 		state.NextRun, state.Running = m.nextRun, m.running
-		if len(m.skipped) > 0 {
-			state.Skipped = map[string]string{}
-			for id, why := range m.skipped {
-				state.Skipped[id] = why
-			}
+		skipped := map[string]string{}
+		for id, why := range m.skipped {
+			skipped[id] = why
 		}
 		m.mu.Unlock()
+
+		// Only what the person may see (visibility.go).
+		newViewer(r.Context(), m.access, routesapi.PrincipalOf(r)).
+			overview(&state, rules, m.history.list(), skipped, m.settings.AllowedDevices)
 
 		answer(w, http.StatusOK, state)
 	})
 
 	mux.HandleFunc("PUT /rules", func(w http.ResponseWriter, r *http.Request) {
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
+
+			return
+		}
+
 		raw, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
 		if err != nil {
 			refuse(w, http.StatusBadRequest, err)
@@ -345,16 +364,39 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
-		if err = checkRules(rules); err != nil {
-			refuse(w, http.StatusUnprocessableEntity, err)
-
-			return
-		}
+		// One save at a time, against the list it was made on.
+		m.saving.Lock()
+		defer m.saving.Unlock()
 
 		kept, err := m.rules.load()
 		if err != nil {
 			// A broken file is replaced, but every rule is then new and checked.
 			kept = nil
+		}
+
+		switch match := ifMatch(r); {
+		case match == "":
+			refuse(w, http.StatusPreconditionRequired, errors.New("send the rules_version of the overview in If-Match"))
+
+			return
+		case kept != nil && match != rulesVersion(kept):
+			refuse(w, http.StatusPreconditionFailed, errors.New("the rules changed since they were read; load them again"))
+
+			return
+		}
+
+		rules = keepHidden(rules, kept)
+
+		if err = refuseUnused(rules); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
+		}
+
+		if err = checkRules(rules); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
 		}
 
 		rules, err = adopt(r.Context(), m.access, m.settings, routesapi.PrincipalOf(r), kept, rules)
@@ -380,7 +422,14 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
-		answer(w, http.StatusOK, rules)
+		view := newViewer(r.Context(), m.access, routesapi.PrincipalOf(r))
+		shown := make([]Rule, 0, len(rules))
+
+		for _, rule := range rules {
+			shown = append(shown, view.rule(rule))
+		}
+
+		answer(w, http.StatusOK, map[string]any{"rules": shown, "rules_version": rulesVersion(rules)})
 	})
 
 	mux.HandleFunc("GET /plan", func(w http.ResponseWriter, r *http.Request) {
@@ -393,10 +442,21 @@ func (m *module) routes() http.Handler {
 
 		only := r.URL.Query().Get("rule")
 		person := routesapi.PrincipalOf(r)
+		view := newViewer(r.Context(), m.access, person)
 		plans := []RulePlan{}
 
 		for _, rule := range rules {
 			if only != "" && rule.ID != only {
+				continue
+			}
+
+			// A printer the person may not see is not read for them, and its
+			// rule says nothing about it (visibility.go).
+			if rule.printer() && !view.observes(rule.Device) {
+				plans = append(plans, RulePlan{
+					RuleID: rule.ID, Name: rule.Name, Target: rule.Target, Delete: []string{}, Error: errHiddenText,
+				})
+
 				continue
 			}
 
@@ -485,6 +545,12 @@ func (m *module) routes() http.Handler {
 	// The page deletes with the person's own rights and reports what it did,
 	// so the history covers both kinds of run.
 	mux.HandleFunc("POST /runs", func(w http.ResponseWriter, r *http.Request) {
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
+
+			return
+		}
+
 		var record RunRecord
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&record); err != nil {
 			refuse(w, http.StatusBadRequest, err)
@@ -513,6 +579,12 @@ func (m *module) routes() http.Handler {
 	})
 
 	mux.HandleFunc("POST /auto/run", func(w http.ResponseWriter, r *http.Request) {
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
+
+			return
+		}
+
 		if !m.settings.scheduled() {
 			refuse(w, http.StatusConflict, fmt.Errorf("the automatic printer run needs auto_interval and printer_auto in the settings"))
 
@@ -576,3 +648,39 @@ type stdio struct{}
 func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
 func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
 func (stdio) Close() error                { return os.Stdin.Close() }
+
+// rulesVersion names a list of rules: the first 16 hex digits of the SHA-256
+// of its JSON. Two saves made on the same list carry the same version, and
+// the second one is refused (PUT /rules).
+func rulesVersion(rules []Rule) string {
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return ""
+	}
+
+	sum := sha256.Sum256(raw)
+
+	return hex.EncodeToString(sum[:8])
+}
+
+// ifMatch is the version a request names in If-Match, without quotes and a
+// weak marker.
+func ifMatch(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("If-Match"))
+	value = strings.TrimPrefix(value, "W/")
+
+	return strings.Trim(value, `"`)
+}
+
+// wantJSON refuses a request that does not say it sends JSON. A browser sends
+// a form or text/plain to another site without asking first, but never
+// application/json, so this keeps such requests out of the routes that change
+// something.
+func wantJSON(r *http.Request) error {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		return errors.New("send the body as application/json")
+	}
+
+	return nil
+}

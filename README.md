@@ -4,7 +4,7 @@
 
 An extension for [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), the self-hosted Prusa Connect server. Prusa Connect Local never deletes anything on its own: the camera keeps writing snapshots, a timelapse extension writes one folder per print, and other extensions may store pictures too. This extension deletes such files by rules per folder. Before anything is deleted, it shows what would go, how the storage is used, and what was deleted last.
 
-Status: 0.5.0, built and tested against Prusa Connect Local **v0.1.0-beta.1**. The page is English with a German translation; Prusa Connect Local shows the one that matches the reader's language. Plans for later versions are in [ROADMAP.md](ROADMAP.md).
+Status: 0.5.0, built and tested against Prusa Connect Local **v0.1.0-beta.2**; the Go tests also pass against v0.1.0-beta.1. The page is English with a German translation; Prusa Connect Local shows the one that matches the reader's language. Plans for later versions are in [ROADMAP.md](ROADMAP.md).
 
 ## What it does
 
@@ -54,7 +54,7 @@ Changes made on the printer's own screen show up the next time the printer is re
 
 A printer rule can keep just the newest N print files (`keep_newest`) with no age limit (`keep_days: 0`, allowed only on printer rules and only with `keep_newest` of at least 1). New printer rules start with the newest 10.
 
-By default a printer rule also **deletes a file only if the same file lies in one of the server's storages**: same long file name (upper and lower case aside) and same size in bytes, in the storage `copy_storage` under the folder `copy_path` and its subfolders (empty: the whole storage). That is normally the case for files you sent to the printer through Connect Local. On the page you pick the folder from a list.
+By default a printer rule also **deletes a file only if the same file lies in one of the server's storages**: same long file name (upper and lower case aside) and same size in bytes, in the storage `copy_storage` under the folder `copy_path` and its subfolders (empty: the whole storage). The copy may also be at most 24 hours newer than the file on the printer: a real copy was uploaded before it was sent, so a file that appeared later is more likely another one of the same name and size. The 24 hours allow for printer clocks and FAT times without a time zone. That is normally the case for files you sent to the printer through Connect Local. On the page you pick the folder from a list.
 
 - A file **without** such a copy (for example copied onto the drive straight from the slicer) still counts among the newest N, but is never deleted. Otherwise older files with a copy would move up and go instead. The preview lists these files separately.
 - If the copies cannot be read completely (storage not readable, folder missing, scan cut short at its limit), **nothing** is deleted.
@@ -62,6 +62,8 @@ By default a printer rule also **deletes a file only if the same file lies in on
 - The copy check can be turned off for a rule run by hand (`skip_copy_check`). An active rule always checks.
 
 The copy storage has to be in `allowed_storages`.
+
+**What the copy check cannot do.** Name, size and time are all it compares. The module protocol gives no checksum of a file on a printer and no way to read one, so the content itself is not compared. Whoever may write to `copy_storage` can therefore put a file of the same name and size there and make a print file on the printer look backed up, and a printer rule may then delete it. Choose a copy storage only people you trust may write to. A check by checksum is on the [roadmap](ROADMAP.md).
 
 ### Automatic printer cleanup
 
@@ -99,7 +101,7 @@ Under Settings → Extensions → Cleanup:
 | `printer_auto_max` | `50` | At most this many files per printer rule and automatic run, 1 to 500. |
 | `printer_auto_dry_run` | `true` | The automatic printer run only writes down what it would delete. |
 
-Permissions the module asks for: `read_storage` and a data folder of its own (`regeln.json`, `verlauf.json`). It declares no network connection (`egress`). On printers it holds nothing unless the operator grants it the operator role for the automatic printer run. It also asks the server two questions it never acts on itself (`checks: write_storage, operate`), also for people who are not signed in at that moment (`check_absent_people`). See below.
+Permissions the module asks for: `read_storage` and a data folder of its own (`regeln.json`, `verlauf.json`). It declares no network connection (`egress`). On printers it holds nothing unless the operator grants it the operator role for the automatic printer run. It also asks the server three questions it never acts on itself (`checks: write_storage, operate, observe`), also for people who are not signed in at that moment (`check_absent_people`). See below.
 
 ### Permissions
 
@@ -108,11 +110,15 @@ Prusa Connect Local guards the module's routes: reading (`GET`) needs `view_reso
 1. **The operator's lists.** Rules may only point at the storages in `allowed_storages` and the printers in `allowed_devices`. Only someone who may configure the extension changes them.
 2. **The author's own rights.** When someone saves a new or changed rule, the module asks the server whether that person may delete there (`write_storage` for storages, `operate` on the printer) and refuses the rule otherwise. The rule remembers who saved it. Before every automatic printer run the module asks again for that person, and skips the rule if they may no longer operate the printer or the server cannot answer. The page shows why a rule was skipped.
 
+Removing a rule takes the same right as changing it, so nobody removes a rule they could not have saved. A save names the list it was made on (`If-Match` with the `rules_version` of the overview); when somebody else saved in between, it is refused and the page loads the new list.
+
+**Who sees what.** Anyone who may open the extension sees the storage rules, the usage and the history of cleanups by hand. What comes from a printer or names one is shown only to a person who may observe that printer: the printer rule itself, the files an automatic run deleted there and why a run left it out. Others see the rule by its name only, marked “no access”, and can still save the other rules. Who saved a rule is shown only to a person who may delete where it points. When the server cannot answer, nothing of it is shown.
+
 A rule that nobody has saved yet, such as a default rule, has no author. It works by hand, but a printer rule only runs on its own after someone with the right to operate that printer has saved it once.
 
 Limits to be aware of:
 
-- In Prusa Connect Local v0.1.0-beta.1, `write_storage` is granted on all storages together, not per storage. `allowed_storages` is what narrows it to single storages.
+- Up to Prusa Connect Local v0.1.0-beta.2, `write_storage` is granted on all storages together, not per storage. `allowed_storages` is what narrows it to single storages.
 - Reading on the page (preview, usage, folders) happens with the signed-in person's rights. The automatic printer run reads storages with the module's own `read_storage`, and printers only with the operator role the operator granted it (see above).
 
 ## Installation
@@ -134,12 +140,12 @@ Prusa Connect Local recognises an update only by its version, so every change ra
 ## Building
 
 ```sh
-make core      # fetch Prusa Connect Local v0.1.0-beta.1 into .core and build its libraries
+make core      # fetch Prusa Connect Local v0.1.0-beta.2 into .core, check its commit, build its libraries
 make test      # Go tests and svelte-check
 make release   # release/cleanup/ and release/cleanup-<version>.tar.gz
 ```
 
-Needs Go 1.26, Node 22, pnpm 11 and git. `ui/pnpm-workspace.yaml` accepts new package versions only after seven days and transitive dependencies only from the registry.
+Needs Go 1.26, Node 22, pnpm 11 and git. `make core` stops when `.core` is not at the commit `CORE_SHA` names, because a tag can be moved; the CI and the Marketplace builder go through the same check. `ui/pnpm-workspace.yaml` accepts new package versions only after seven days and transitive dependencies only from the registry.
 
 ## Translations
 
@@ -152,6 +158,7 @@ The page's texts are in `ui/src/locales/`: `en.json` is the source, `de.json` th
 | `main.go` | start, the module's routes, the schedule of the printer run |
 | `rules.go` | rules, defaults, validation |
 | `policy.go` | the operator's lists and the author's rights |
+| `visibility.go` | what the overview shows a person |
 | `plan.go` | what a rule would delete now, storage usage |
 | `printer.go` | printer rules: reading a printer's storage |
 | `copies.go` | printer rules: the copies on the server, the folder list |
@@ -164,7 +171,7 @@ Routes under `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`:
 | Route | Purpose |
 |---|---|
 | `GET /overview` | rules, settings, history |
-| `PUT /rules` | save the rules (checked against the person's rights) |
+| `PUT /rules` | save the rules (with `If-Match`, checked against the person's rights) |
 | `GET /plan?rule=…` | what a rule would delete now (a printer rule only when asked for alone) |
 | `GET /usage?storage=…` | usage per top-level folder |
 | `GET /folders?storage=…&path=…` | the folders one level below a path, for picking the copy folder |

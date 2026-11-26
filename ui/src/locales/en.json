@@ -146,5 +146,9 @@
   "history.dryRun": "dry run",
   "history.partial": "incomplete",
   "history.listDeleted": "Deleted: {count, plural, one {# file} other {# files}}",
-  "history.listWould": "Would have been deleted: {count, plural, one {# file} other {# files}}"
+  "history.listWould": "Would have been deleted: {count, plural, one {# file} other {# files}}",
+  "error.stale": "Somebody else changed the rules meanwhile. The page shows them again; make your change once more.",
+  "rule.badge.noAccess": "no access",
+  "rule.hiddenText": "A rule for a printer you may not see. Only people who may see that printer see its details.",
+  "history.hidden": "details hidden, you may not see this printer"
 }

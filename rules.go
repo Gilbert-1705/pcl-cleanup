@@ -34,6 +34,11 @@ import (
 // SavedBy is the principal who last saved the rule in a changed form. The
 // server sets it, never the page. An automatic run deletes for a rule only
 // while that person may still delete in its storage themselves.
+//
+// Hidden marks a printer rule the reader may not see in full (see
+// visibility.go): the overview sends it with its id and name only. The page
+// sends it back as it got it, and the server then keeps the stored rule as it
+// is. It is never stored.
 type Rule struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -52,6 +57,7 @@ type Rule struct {
 	CopyPath      string `json:"copy_path,omitempty"`
 	SkipCopyCheck bool   `json:"skip_copy_check,omitempty"`
 	SavedBy       string `json:"saved_by,omitempty"`
+	Hidden        bool   `json:"hidden,omitempty"`
 }
 
 const (
@@ -68,6 +74,12 @@ const (
 // storage holds the prints themselves, and a rule there never reaches
 // anything else, such as firmware or settings files.
 var printFileSuffixes = []string{".bgcode", ".gcode"}
+
+// printPathSuffixes are the endings a path the printer reports may have
+// before a printer rule deletes it: the print file endings, and their FAT
+// short forms (PRINT~1.BGC, PART~1.GCO), because a printer may report the
+// short name in the path and the long one only as the display name.
+var printPathSuffixes = []string{".bgcode", ".gcode", ".bgc", ".gco"}
 
 // sameRule reports whether two rules say the same thing, apart from who saved
 // them. A rule that is unchanged keeps its author when another person saves
@@ -251,6 +263,19 @@ func checkRules(rules []Rule) error {
 	return nil
 }
 
+// refuseUnused refuses what a saved rule would carry without effect, so a
+// rule does not say more than it does: a pattern on a folder rule, which
+// judges whole folders whatever they hold.
+func refuseUnused(rules []Rule) error {
+	for _, rule := range rules {
+		if strings.TrimSpace(rule.Mode) == modeFolders && strings.TrimSpace(rule.Pattern) != "" {
+			return fmt.Errorf("%w: %s: a folder rule judges whole folders, so it takes no pattern", errRule, rule.ID)
+		}
+	}
+
+	return nil
+}
+
 // cutoff is the moment before which a unit counts as old.
 func (r Rule) cutoff(now time.Time) time.Time {
 	return now.Add(-time.Duration(r.KeepDays) * 24 * time.Hour)
@@ -272,6 +297,17 @@ func (f rulesFile) load() ([]Rule, error) {
 	var rules []Rule
 	if err = json.Unmarshal(raw, &rules); err != nil {
 		return nil, err
+	}
+
+	// Up to 0.5.0 a folder rule could keep a pattern it never used (the page
+	// left the one from files mode in place). It is dropped here, so the rule
+	// still loads; a new save with one is refused (refuseUnused).
+	for i := range rules {
+		if rules[i].Mode == modeFolders {
+			rules[i].Pattern = ""
+		}
+
+		rules[i].Hidden = false
 	}
 
 	return rules, checkRules(rules)

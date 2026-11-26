@@ -137,6 +137,12 @@ func printerFiles(ctx context.Context, printers devices, rule Rule, person strin
 				continue
 			}
 
+			// What gets deleted is f.Path, so it, not only the name, has to be
+			// a print file directly in the rule's folder.
+			if !printPathIn(f.Path, rule.Path) {
+				continue
+			}
+
 			if ok, _ := path.Match(pattern, name); !ok {
 				continue
 			}
@@ -151,6 +157,28 @@ func printerFiles(ctx context.Context, printers devices, rule Rule, person strin
 	}
 
 	return units, nil
+}
+
+// printPathIn reports whether p, a path the printer reported, is a print file
+// directly in dir: not in a folder below it, not elsewhere, and with a print
+// file ending or its FAT short form. Case is ignored, as FAT ignores it.
+func printPathIn(p, dir string) bool {
+	lower := strings.ToLower(strings.TrimSpace(p))
+	if lower == "" || path.Clean(lower) != lower || strings.Contains(lower, "\\") {
+		return false
+	}
+
+	if !strings.EqualFold(path.Dir(lower), strings.ToLower(dir)) {
+		return false
+	}
+
+	for _, suffix := range printPathSuffixes {
+		if strings.HasSuffix(lower, suffix) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // jobFiles are the files of the current and the last print, by path and by
