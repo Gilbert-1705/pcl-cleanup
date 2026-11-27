@@ -13,6 +13,8 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -649,18 +651,31 @@ func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
 func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
 func (stdio) Close() error                { return os.Stdin.Close() }
 
-// rulesVersion names a list of rules: the first 16 hex digits of the SHA-256
-// of its JSON. Two saves made on the same list carry the same version, and
-// the second one is refused (PUT /rules).
+// versionKey keys rulesVersion. It is new each time the process starts, so
+// nobody can check a guess of the rules against a version, not even of a
+// printer rule hidden from them. A version still changes whenever any rule
+// does. After a restart every version differs, the page's next save is
+// refused once with 412, and the page loads the list again.
+var versionKey = func() []byte {
+	key := make([]byte, 32)
+	_, _ = rand.Read(key) // crypto/rand.Read does not fail (Go 1.24).
+
+	return key
+}()
+
+// rulesVersion names a list of rules: the first 16 hex digits of an
+// HMAC-SHA256 of its JSON under versionKey. Two saves made on the same list
+// carry the same version, and the second one is refused (PUT /rules).
 func rulesVersion(rules []Rule) string {
 	raw, err := json.Marshal(rules)
 	if err != nil {
 		return ""
 	}
 
-	sum := sha256.Sum256(raw)
+	mac := hmac.New(sha256.New, versionKey)
+	mac.Write(raw)
 
-	return hex.EncodeToString(sum[:8])
+	return hex.EncodeToString(mac.Sum(nil)[:8])
 }
 
 // ifMatch is the version a request names in If-Match, without quotes and a

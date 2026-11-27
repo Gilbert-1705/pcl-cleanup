@@ -60,7 +60,7 @@ export interface RulePlan {
 
 export interface RunRecord {
   at: string;
-  /** 'schedule', 'request', or 'hand:' followed by the person. Older runs may hold free text. */
+  /** 'schedule', 'request', 'hand:' followed by the person, or 'hand' when the reader may not see who. Older runs may hold free text. */
   by: string;
   rule: string;
   units: number;

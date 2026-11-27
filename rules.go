@@ -247,6 +247,7 @@ func checkRules(rules []Rule) error {
 	}
 
 	seen := map[string]bool{}
+	named := map[string]bool{}
 
 	for i := range rules {
 		if err := rules[i].check(); err != nil {
@@ -258,6 +259,17 @@ func checkRules(rules []Rule) error {
 		}
 
 		seen[rules[i].ID] = true
+
+		// The history names a run by its rule's name (POST /runs), and the
+		// overview finds the rule of a run by that name to decide who may
+		// see who ran it (visibility.go). So a name is used once, upper and
+		// lower case aside.
+		name := strings.ToLower(strings.TrimSpace(rules[i].Name))
+		if named[name] {
+			return fmt.Errorf("%w: the name %q is used twice", errRule, rules[i].Name)
+		}
+
+		named[name] = true
 	}
 
 	return nil

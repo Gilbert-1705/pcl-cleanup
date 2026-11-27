@@ -142,6 +142,7 @@
   "history.by.schedule": "automatisch",
   "history.by.request": "von Hand angestoßen",
   "history.by.hand": "von Hand ({person})",
+  "history.by.handHidden": "von Hand",
   "history.allRules": "alle Regeln",
   "history.dryRun": "Probelauf",
   "history.partial": "unvollständig",

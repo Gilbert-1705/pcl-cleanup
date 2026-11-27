@@ -142,6 +142,7 @@
   "history.by.schedule": "automatically",
   "history.by.request": "started by hand",
   "history.by.hand": "by hand ({person})",
+  "history.by.handHidden": "by hand",
   "history.allRules": "all rules",
   "history.dryRun": "dry run",
   "history.partial": "incomplete",

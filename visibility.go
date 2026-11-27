@@ -23,6 +23,8 @@ import (
 //   - Why the last automatic run left a printer rule out is shown only with
 //     the rule.
 //   - saved_by comes only to a person who may delete where the rule points.
+//   - Who ran a rule by hand comes only to that person and to a person who
+//     may delete where the rule points; others read "hand" (byHandHidden).
 //   - allowed_devices lists only printers the person may observe ("*" stays).
 
 // actionObserve is what a person needs on a printer to see what is on it.
@@ -32,6 +34,10 @@ const actionObserve = "observe"
 // see.
 const errHiddenText = "hidden: you may not see this printer"
 
+// byHandHidden is RunRecord.By of a run by hand for a reader who may not
+// learn who ran it.
+const byHandHidden = "hand"
+
 // viewer answers, for one request, what a person may see. It asks the server
 // once per printer and rule.
 type viewer struct {
@@ -39,10 +45,14 @@ type viewer struct {
 	access   checker
 	person   string
 	observed map[string]bool
+	changes  map[string]bool
 }
 
 func newViewer(ctx context.Context, access checker, person string) *viewer {
-	return &viewer{ctx: ctx, access: access, person: strings.TrimSpace(person), observed: map[string]bool{}}
+	return &viewer{
+		ctx: ctx, access: access, person: strings.TrimSpace(person),
+		observed: map[string]bool{}, changes: map[string]bool{},
+	}
 }
 
 // observes reports whether the person may see the printer device.
@@ -67,7 +77,34 @@ func (v *viewer) observes(device string) bool {
 // mayChange reports whether the person may delete where rule points, the
 // same question a save asks.
 func (v *viewer) mayChange(rule Rule) bool {
-	return v.access != nil && mayDelete(v.ctx, v.access, v.person, rule) == nil
+	if may, ok := v.changes[rule.ID]; ok {
+		return may
+	}
+
+	may := v.access != nil && v.person != "" && mayDelete(v.ctx, v.access, v.person, rule) == nil
+	v.changes[rule.ID] = may
+
+	return may
+}
+
+// who is RunRecord.By as the person may see it: a run by hand names who ran
+// it only to that person and to a person who may change rule. rule is nil
+// when no stored rule has the run's name any more.
+func (v *viewer) who(by string, rule *Rule) string {
+	ran, byHandOf := strings.CutPrefix(by, byHand)
+	if !byHandOf {
+		return by
+	}
+
+	if v.person != "" && ran == v.person {
+		return by
+	}
+
+	if rule != nil && v.mayChange(*rule) {
+		return by
+	}
+
+	return byHandHidden
 }
 
 // rule is rule as the person may see it.
@@ -83,8 +120,11 @@ func (v *viewer) rule(rule Rule) Rule {
 	return rule
 }
 
-// run is a history entry as the person may see it.
-func (v *viewer) run(record RunRecord) RunRecord {
+// run is a history entry as the person may see it. rule is the stored rule
+// of that name, or nil.
+func (v *viewer) run(record RunRecord, rule *Rule) RunRecord {
+	record.By = v.who(record.By, rule)
+
 	if len(record.Deleted) == 0 && record.Device == "" {
 		return record
 	}
@@ -106,6 +146,20 @@ func (v *viewer) run(record RunRecord) RunRecord {
 // overview fills the parts of state that depend on the person.
 func (v *viewer) overview(state *State, rules []Rule, history []RunRecord, skipped map[string]string, devices []string) {
 	visible := map[string]bool{}
+	// A run names its rule by name, and names are unique (checkRules). Two
+	// stored rules of one name, kept from before that check, name no rule:
+	// who ran it is then shown to nobody but that person.
+	byName := map[string]*Rule{}
+
+	for i := range rules {
+		if _, taken := byName[rules[i].Name]; taken {
+			byName[rules[i].Name] = nil
+
+			continue
+		}
+
+		byName[rules[i].Name] = &rules[i]
+	}
 
 	state.Rules = make([]Rule, 0, len(rules))
 	for _, rule := range rules {
@@ -116,7 +170,7 @@ func (v *viewer) overview(state *State, rules []Rule, history []RunRecord, skipp
 
 	state.History = make([]RunRecord, 0, len(history))
 	for _, record := range history {
-		state.History = append(state.History, v.run(record))
+		state.History = append(state.History, v.run(record, byName[record.Rule]))
 	}
 
 	for id, why := range skipped {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -428,5 +430,142 @@ func TestTheHistoryIsWrittenWhole(t *testing.T) {
 
 	if again := loadHistory(filepath.Join(dir, "verlauf.json")); len(again.list()) != 3 {
 		t.Fatalf("history read back: %+v", again.list())
+	}
+}
+
+// R-01 (re-check of 27.11.2026): who cleaned up by hand comes only to that
+// person and to a person who may change the rule, as saved_by does.
+func TestWhoCleanedUpByHandShowsOnlyToWhoMayChangeTheRule(t *testing.T) {
+	access := &fakeAccess{allow: map[string]bool{"user:anna write_storage resource_kind/storage": true}}
+	_, h := newModule(t, checked(t, Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}}), access)
+
+	body := `{"rule":"Camera snapshots","units":1,"files":1,"freed":1}`
+	if rec := call(t, h, "user:anna", "POST", "/runs", body); rec.Code != http.StatusCreated {
+		t.Fatalf("anna could not record her cleanup: %d %s", rec.Code, rec.Body)
+	}
+
+	byOf := func(person string) string {
+		t.Helper()
+
+		history := overviewFor(t, h, person).History
+		if len(history) != 1 {
+			t.Fatalf("%s sees %d runs", person, len(history))
+		}
+
+		return history[0].By
+	}
+
+	if by := byOf("user:anna"); by != "hand:user:anna" {
+		t.Errorf("anna reads her own run as %q", by)
+	}
+
+	for _, person := range []string{"user:gast", ""} {
+		if by := byOf(person); by != byHandHidden {
+			t.Errorf("%q reads who cleaned up: %q", person, by)
+		}
+	}
+
+	// May delete there, so may see who did.
+	access.mu.Lock()
+	access.allow["user:bob write_storage resource_kind/storage"] = true
+	access.mu.Unlock()
+
+	if by := byOf("user:bob"); by != "hand:user:anna" {
+		t.Errorf("bob, who may change the rule, reads %q", by)
+	}
+
+	// A run whose rule is gone names nobody to others.
+	if rec := call(t, h, "user:anna", "PUT", "/rules", "[]"); rec.Code != http.StatusOK {
+		t.Fatalf("anna could not remove the rules: %d %s", rec.Code, rec.Body)
+	}
+
+	if by := byOf("user:bob"); by != byHandHidden {
+		t.Errorf("bob reads who ran a rule that is gone: %q", by)
+	}
+}
+
+// R-02 (re-check of 27.11.2026): rules_version is keyed, so it cannot be
+// checked against a guess of the rules, hidden ones included.
+func TestTheRulesVersionCannotBeCheckedAgainstAGuess(t *testing.T) {
+	rules := []Rule{printerRule()}
+
+	raw, _ := json.Marshal(rules)
+	plain := sha256.Sum256(raw)
+
+	version := rulesVersion(rules)
+	if version == hex.EncodeToString(plain[:8]) {
+		t.Fatal("the version is the plain hash of the rules")
+	}
+
+	if len(version) != 16 || version != rulesVersion(rules) {
+		t.Fatalf("the version is not 16 stable hex digits: %q", version)
+	}
+
+	other := printerRule()
+	other.KeepDays++
+	if rulesVersion([]Rule{other}) == version {
+		t.Fatal("a changed rule keeps its version")
+	}
+}
+
+// R-04 (re-check of 27.11.2026): a rule of the same name put first must not
+// tell who ran another rule by hand. Names are unique, and two stored rules
+// of one name, kept from before, name nobody.
+func TestARuleOfTheSameNameDoesNotTellWhoRanAnother(t *testing.T) {
+	access := &fakeAccess{allow: map[string]bool{
+		"user:anna write_storage resource_kind/storage": true,
+		"user:anna operate device/dev-1":                true,
+		"user:anna observe device/dev-1":                true,
+		"user:bob write_storage resource_kind/storage":  true,
+	}}
+	m, h := newModule(t, checked(t, Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}, AllowedDevices: []string{"dev-1"}}), access)
+
+	rule := printerRule()
+	rule.Name = "Old print files"
+
+	body, _ := json.Marshal(append(defaultRules(), rule))
+	if rec := call(t, h, "user:anna", "PUT", "/rules", string(body)); rec.Code != http.StatusOK {
+		t.Fatalf("anna could not add her printer rule: %d %s", rec.Code, rec.Body)
+	}
+
+	if rec := call(t, h, "user:anna", "POST", "/runs", `{"rule":"Old print files","units":1,"files":1,"freed":1}`); rec.Code != http.StatusCreated {
+		t.Fatalf("anna could not record her cleanup: %d %s", rec.Code, rec.Body)
+	}
+
+	// bob may change storage rules, not the printer rule.
+	if by := overviewFor(t, h, "user:bob").History[0].By; by != byHandHidden {
+		t.Fatalf("bob reads who ran anna's printer rule: %q", by)
+	}
+
+	// The attack: bob's own storage rule of the same name, put first.
+	twin := defaultRules()[0]
+	twin.ID, twin.Name = "twin", "old print files"
+
+	stored, _ := m.rules.load()
+	shown := overviewFor(t, h, "user:bob").Rules
+
+	body, _ = json.Marshal(append([]Rule{twin}, shown...))
+	if rec := call(t, h, "user:bob", "PUT", "/rules", string(body)); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("a second rule of the same name was saved: %d %s", rec.Code, rec.Body)
+	}
+
+	if by := overviewFor(t, h, "user:bob").History[0].By; by != byHandHidden {
+		t.Fatalf("bob reads who ran anna's printer rule: %q", by)
+	}
+
+	// Two rules of one name already stored: the run names nobody to bob.
+	if err := m.rules.save(append([]Rule{{
+		ID: "twin", Name: "Old print files", Enabled: false, Target: "storage", Storage: "local",
+		Path: "camera", Mode: "files", Pattern: "*.jpg", KeepDays: 14,
+	}}, stored...)); err != nil {
+		t.Fatal(err)
+	}
+
+	if by := overviewFor(t, h, "user:bob").History[0].By; by != byHandHidden {
+		t.Fatalf("with two stored rules of one name, bob reads %q", by)
+	}
+
+	if by := overviewFor(t, h, "user:anna").History[0].By; by != "hand:user:anna" {
+		t.Fatalf("anna does not see her own run: %q", by)
 	}
 }

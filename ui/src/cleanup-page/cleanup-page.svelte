@@ -453,6 +453,8 @@
     if (by === 'schedule') return t('history.by.schedule');
     if (by === 'request') return t('history.by.request');
     if (by.startsWith('hand:')) return t('history.by.hand', { person: by.slice('hand:'.length) });
+    // By hand, by someone the reader may not learn about.
+    if (by === 'hand') return t('history.by.handHidden');
 
     // A run written by a version before 0.5.0.
     return by;
