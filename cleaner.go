@@ -1,22 +1,14 @@
 package main
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
 	"time"
 )
-
-// deleteBatch is how many paths go into one deletion request.
-const deleteBatch = 200
 
 // historyLength is how many runs the page lists.
 const historyLength = 30
@@ -27,14 +19,16 @@ const historyLength = 30
 // only point at the storages and printers they name, "*" naming all. See
 // policy.go.
 //
-// PrinterAuto lets printer rules run on the schedule too (auto_printer.go).
+// Storage rules never run on the schedule: the module protocol cannot delete
+// in a storage, so they are run from the page, with the person's own rights.
+// AutoInterval only drives printer rules.
+//
+// PrinterAuto lets printer rules run on the schedule (auto_printer.go).
 // PrinterAutoMax bounds the files one such run deletes per rule, and
 // PrinterAutoDryRun, on unless set to false, has the run only write down what
 // it would delete. Both are pointers so that a missing value, as after an
 // update that did not ask for the new options, takes the safe default.
 type Settings struct {
-	CoreURL           string   `json:"core_url"`
-	APIToken          string   `json:"api_token"`
 	AutoInterval      string   `json:"auto_interval"`
 	AllowedStorages   []string `json:"allowed_storages"`
 	AllowedDevices    []string `json:"allowed_devices"`
@@ -62,11 +56,6 @@ func (s *Settings) check() error {
 	}
 
 	s.interval = every
-	if s.CoreURL != "" {
-		if s.CoreURL, err = checkCoreURL(s.CoreURL); err != nil {
-			return err
-		}
-	}
 
 	var err2 error
 	if s.AllowedStorages, err2 = cleanList("allowed_storages", s.AllowedStorages, 64); err2 != nil {
@@ -108,21 +97,25 @@ func cleanList(key string, list []string, longest int) ([]string, error) {
 	return out, nil
 }
 
-// automatic reports whether storage rules run on the schedule: they delete
-// through the HTTP API with the token.
-func (s Settings) automatic() bool {
-	return s.interval > 0 && s.APIToken != "" && s.CoreURL != ""
-}
-
 // printerAutomatic reports whether printer rules run on the schedule. They
-// need no token: they read and delete through the module protocol, as the
-// module itself, which the operator has to make an operator of each printer.
+// read and delete through the module protocol, as the module itself, which the
+// operator has to make an operator of each printer.
 func (s Settings) printerAutomatic() bool {
 	return s.interval > 0 && s.PrinterAuto
 }
 
-// scheduled reports whether anything runs on the schedule.
-func (s Settings) scheduled() bool { return s.automatic() || s.printerAutomatic() }
+// scheduled reports whether anything runs on the schedule. Only printer rules
+// do; see Settings.
+func (s Settings) scheduled() bool { return s.printerAutomatic() }
+
+// What RunRecord.By holds, so the page can word it in the reader's language:
+// the schedule, the page asking for the scheduled run now, or a cleanup by
+// hand, followed by the person who ran it.
+const (
+	bySchedule = "schedule"
+	byRequest  = "request"
+	byHand     = "hand:"
+)
 
 // RunRecord is one cleanup, by hand or on the schedule.
 type RunRecord struct {
@@ -135,8 +128,11 @@ type RunRecord struct {
 	Error   string    `json:"error,omitempty"`
 	Partial bool      `json:"partial,omitempty"`
 	// Deleted names each file an automatic printer run deleted, or would
-	// have deleted in a dry run.
+	// have deleted in a dry run, and Device the printer it ran on. Only the
+	// overview's reader who may observe that printer gets either
+	// (visibility.go).
 	Deleted []string `json:"deleted,omitempty"`
+	Device  string   `json:"device,omitempty"`
 	DryRun  bool     `json:"dry_run,omitempty"`
 }
 
@@ -161,8 +157,8 @@ func (r *RunRecord) clean() error {
 		return errors.New("units, files and freed cannot be negative")
 	}
 
-	// Only the module writes the files of an automatic run.
-	r.Deleted, r.DryRun = nil, false
+	// Only the module writes the files and the printer of an automatic run.
+	r.Deleted, r.Device, r.DryRun = nil, "", false
 
 	if len(r.Error) > maxRecordError {
 		r.Error = strings.ToValidUTF8(r.Error[:maxRecordError], "") + " …"
@@ -196,8 +192,13 @@ func (h *history) add(r RunRecord) {
 		h.runs = h.runs[:historyLength]
 	}
 
+	// Through a file of its own and a rename, as the rules, so a crash while
+	// writing leaves the old history and not a broken one.
 	if raw, err := json.MarshalIndent(h.runs, "", "  "); err == nil {
-		_ = os.WriteFile(h.path, raw, 0o640)
+		tmp := h.path + ".tmp"
+		if os.WriteFile(tmp, raw, 0o640) == nil {
+			_ = os.Rename(tmp, h.path)
+		}
 	}
 }
 
@@ -206,49 +207,4 @@ func (h *history) list() []RunRecord {
 	defer h.mu.Unlock()
 
 	return append([]RunRecord{}, h.runs...)
-}
-
-// deleter removes entries through the server's own HTTP API, with the token
-// the operator gave the module. The module protocol can write and read files
-// but not delete them, so this is the only way to delete with nobody on the
-// page.
-type deleter struct {
-	base   string
-	token  string
-	client *http.Client
-}
-
-func (d deleter) remove(ctx context.Context, storage string, paths []string) (int, error) {
-	done := 0
-
-	for start := 0; start < len(paths); start += deleteBatch {
-		batch := paths[start:min(start+deleteBatch, len(paths))]
-
-		body, _ := json.Marshal(map[string]any{"paths": batch})
-		address := d.base + "/api/v1/storages/" + url.PathEscape(storage) + "/deletions"
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, address, bytes.NewReader(body))
-		if err != nil {
-			return done, err
-		}
-
-		req.Header.Set("Authorization", "Bearer "+d.token)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := d.client.Do(req)
-		if err != nil {
-			return done, err
-		}
-
-		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
-		resp.Body.Close()
-
-		if resp.StatusCode/100 != 2 {
-			return done, fmt.Errorf("the server answered %s: %s", resp.Status, strings.TrimSpace(string(detail)))
-		}
-
-		done += len(batch)
-	}
-
-	return done, nil
 }

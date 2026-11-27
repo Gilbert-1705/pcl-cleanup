@@ -1,10 +1,16 @@
+import { formatBytes, formatDateTime } from '@prusa/connect-ui/i18n';
 import type { ModuleHost } from '@prusa/connect-ui/slots';
 
 export interface Rule {
   id: string;
   name: string;
   enabled: boolean;
-  /** 'storage' (Standard) oder 'printer' für den eigenen Speicher eines Druckers. */
+  /**
+   * A printer rule the reader may not see in full: it comes with id, name and
+   * state only. Send it back unchanged; the server keeps the stored rule.
+   */
+  hidden?: boolean;
+  /** 'storage' (the default) or 'printer' for a printer's own storage. */
   target?: 'storage' | 'printer';
   storage?: string;
   device?: string;
@@ -14,13 +20,13 @@ export interface Rule {
   pattern?: string;
   keep_days: number;
   keep_newest?: number;
-  /** Drucker-Regel: Speicher des Servers mit den Kopien der Druckdateien. */
+  /** Printer rule: the server storage that holds the copies of the print files. */
   copy_storage?: string;
-  /** Drucker-Regel: Ordner mit den Kopien, leer = ganzer Speicher. */
+  /** Printer rule: the folder with the copies, empty for the whole storage. */
   copy_path?: string;
-  /** Drucker-Regel: Kopie-Abgleich aus (nur von Hand). Standard: Abgleich an. */
+  /** Printer rule: no copy check (by hand only). By default the check is on. */
   skip_copy_check?: boolean;
-  /** Wer die Regel zuletzt geändert gespeichert hat. Setzt nur der Server. */
+  /** Who last saved the rule with a change. Only the server sets it. */
   saved_by?: string;
 }
 
@@ -40,20 +46,21 @@ export interface RulePlan {
   delete_files: number;
   delete_size: number;
   delete?: string[];
-  /** Drucker-Regel: Dateien, die nach Alter und Anzahl gingen, aber keine Kopie haben. */
+  /** Printer rule: files age and count would delete, but that have no copy. */
   kept_no_copy?: number;
   kept_no_copy_size?: number;
   kept_no_copy_list?: string[];
-  /** Der Plan löscht nur Dateien mit Kopie auf dem Server. */
+  /** The plan only deletes files with a copy on the server. */
   copy_check?: boolean;
   truncated?: boolean;
-  /** Drucker-Regel, die die Übersicht nicht liest. Einzeln anfragen. */
+  /** A printer rule the overview does not read. Ask for it alone. */
   lazy?: boolean;
   error?: string;
 }
 
 export interface RunRecord {
   at: string;
+  /** 'schedule', 'request', 'hand:' followed by the person, or 'hand' when the reader may not see who. Older runs may hold free text. */
   by: string;
   rule: string;
   units: number;
@@ -61,25 +68,27 @@ export interface RunRecord {
   freed: number;
   error?: string;
   partial?: boolean;
-  /** Automatischer Drucker-Lauf: jede gelöschte Datei, im Probelauf jede, die gelöscht worden wäre. */
+  /** Automatic printer run: each deleted file, in a dry run each one that would have been. */
   deleted?: string[];
   dry_run?: boolean;
 }
 
 export interface State {
   rules: Rule[];
-  automatic: boolean;
+  /** Names the stored rules; a save sends it back (writeRules). */
+  rules_version: string;
+  /** The interval of the automatic printer run, when auto_interval is set. */
   interval?: string;
   next_run?: string;
   running: boolean;
   history: RunRecord[];
-  /** Warum der letzte automatische Lauf eine Regel ausgelassen hat, je Regel-ID. */
+  /** Why the last automatic printer run left a rule out, by rule id. */
   skipped?: Record<string, string>;
   allowed_storages: string[] | null;
   allowed_devices: string[] | null;
-  /** Drucker-Regeln dürfen aktiv sein (printer_auto). */
+  /** Printer rules may be active (printer_auto). */
   printer_auto: boolean;
-  /** … und laufen auch, weil auto_interval gesetzt ist. */
+  /** … and they also run, because auto_interval is set. */
   printer_automatic: boolean;
   printer_auto_max: number;
   printer_auto_dry_run: boolean;
@@ -103,9 +112,9 @@ export interface Usage {
   truncated?: boolean;
 }
 
-// Die App lädt dieses Bündel von /api/v1/modules/<namespace>/ui/ui/index.js.
-// Die eigenen Routen liegen unter /api/v1/modules/<namespace>/. Aus der eigenen
-// Adresse abgeleitet, weil ModuleHost.namespace erst nach v0.1.0-beta.1 kam.
+// The app loads this bundle from /api/v1/modules/<namespace>/ui/ui/index.js.
+// The module's own routes are under /api/v1/modules/<namespace>/. Derived from
+// the bundle's own address, as ModuleHost.namespace came after v0.1.0-beta.1.
 const moduleBase = ((): string => {
   const path = new URL(import.meta.url).pathname;
   const cut = path.indexOf('/ui/');
@@ -116,11 +125,29 @@ const moduleBase = ((): string => {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 const base = (_host: ModuleHost): string => moduleBase;
 
-const call = async <T>(host: ModuleHost, method: string, path: string, body?: unknown): Promise<T> => {
+/** An answer of the module that was not a success, with its HTTP status. */
+export class CallError extends Error {
+  constructor(
+    readonly status: number,
+    detail: string,
+  ) {
+    super(`${status}: ${detail}`);
+  }
+}
+
+// Every route that changes something takes JSON only, so a body is always
+// sent as JSON, an empty object where the route needs none.
+const call = async <T>(
+  host: ModuleHost,
+  method: string,
+  path: string,
+  body?: unknown,
+  headers: Record<string, string> = {},
+): Promise<T> => {
   const init: RequestInit = { method, credentials: 'same-origin' };
-  if (body !== undefined) {
-    init.body = JSON.stringify(body);
-    init.headers = { 'Content-Type': 'application/json' };
+  if (method !== 'GET') {
+    init.body = JSON.stringify(body ?? {});
+    init.headers = { ...headers, 'Content-Type': 'application/json' };
   }
 
   const response = await fetch(`${base(host)}${path}`, init);
@@ -131,9 +158,9 @@ const call = async <T>(host: ModuleHost, method: string, path: string, body?: un
     try {
       detail = (JSON.parse(text) as { detail?: string }).detail ?? text;
     } catch {
-      // Kein JSON: der Text selbst ist die Meldung.
+      // Not JSON: the text itself is the message.
     }
-    throw new Error(`${response.status}: ${detail}`);
+    throw new CallError(response.status, detail);
   }
 
   return (text ? JSON.parse(text) : undefined) as T;
@@ -141,8 +168,16 @@ const call = async <T>(host: ModuleHost, method: string, path: string, body?: un
 
 export const readState = (host: ModuleHost): Promise<State> => call(host, 'GET', '/overview');
 
-export const writeRules = (host: ModuleHost, rules: Rule[]): Promise<Rule[]> =>
-  call(host, 'PUT', '/rules', rules);
+/**
+ * Saves the rules, made on the list the overview named with version. A list
+ * that changed since answers 412 (CallError).
+ */
+export const writeRules = (
+  host: ModuleHost,
+  rules: Rule[],
+  version: string,
+): Promise<{ rules: Rule[]; rules_version: string }> =>
+  call(host, 'PUT', '/rules', rules, { 'If-Match': `"${version}"` });
 
 export const readPlans = async (host: ModuleHost): Promise<RulePlan[]> =>
   (await call<{ plans: RulePlan[] }>(host, 'GET', '/plan')).plans;
@@ -168,7 +203,7 @@ export const recordRun = (host: ModuleHost, record: Omit<RunRecord, 'at' | 'by'>
 
 export const runNow = (host: ModuleHost): Promise<{ runs: RunRecord[] }> => call(host, 'POST', '/auto/run');
 
-/** Löscht mit den Rechten der angemeldeten Person, in Stapeln von 200. */
+/** Deletes with the signed-in person's rights, in batches of 200. */
 export const deletePaths = async (
   host: ModuleHost,
   storage: string,
@@ -188,9 +223,9 @@ export const deletePaths = async (
 };
 
 /**
- * Löscht Druckdateien vom Speicher eines Druckers, eine nach der anderen und mit
- * den Rechten der angemeldeten Person. Der Drucker beantwortet einen Befehl nach
- * dem anderen, deshalb nicht parallel.
+ * Deletes print files from a printer's own storage, one after the other and
+ * with the signed-in person's rights. The printer answers one command at a
+ * time, so not in parallel.
  */
 export const deletePrinterFiles = async (
   host: ModuleHost,
@@ -209,22 +244,18 @@ export const deletePrinterFiles = async (
   return done;
 };
 
-/** Ob eine Liste aus den Einstellungen einen Namen zulässt. „*“ lässt alles zu. */
+/** Whether a list from the settings lets a name in. "*" lets everything in. */
 export const allowed = (list: string[] | null | undefined, name: string): boolean =>
   (list ?? []).includes('*') || (list ?? []).includes(name);
 
-export const bytes = (n: number): string => {
-  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(2)} GB`;
-  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(0)} kB`;
+/** A size in the reader's language. */
+export const bytes = (n: number): string => formatBytes(n);
 
-  return `${n} B`;
-};
-
+/** A point in time in the reader's language, or '' for none. */
 export const when = (iso?: string): string => {
   if (!iso) return '';
   const date = new Date(iso);
   if (Number.isNaN(date.getTime()) || date.getFullYear() < 1971) return '';
 
-  return date.toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+  return formatDateTime(date);
 };

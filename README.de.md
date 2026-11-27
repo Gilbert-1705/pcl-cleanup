@@ -1,76 +1,78 @@
 # pcl-cleanup – Aufräumen für Prusa Connect Local
 
-*Deutsche Übersetzung. Maßgeblich ist die englische [README.md](README.md).*
+*English version: [README.md](README.md)*
 
-Eine Erweiterung für [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), den selbst gehosteten Prusa-Connect-Server. Prusa Connect Local löscht von sich aus nichts: Die Kamera legt laufend Snapshots ab, eine Zeitraffer-Erweiterung schreibt pro Druck einen Ordner, und andere Erweiterungen legen eventuell Bilder ab. Diese Erweiterung löscht so etwas nach Regeln je Ordner. Vorher zeigt sie, was weg kann, wie sich der Speicher verteilt und was zuletzt gelöscht wurde.
+Eine Erweiterung für [Prusa Connect Local](https://github.com/prusa3d/prusa-connect), den selbst betriebenen Prusa-Connect-Server. Prusa Connect Local löscht von sich aus nichts: Die Kamera schreibt laufend Snapshots, eine Zeitraffer-Erweiterung legt je Druck einen Ordner an, und andere Erweiterungen speichern ebenfalls Bilder. Diese Erweiterung löscht solche Dateien nach Regeln je Ordner. Bevor etwas gelöscht wird, zeigt sie, was weg würde, wie der Speicher belegt ist und was zuletzt gelöscht wurde.
 
-Stand: 0.4.1, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.1**. Die Oberfläche ist deutsch, die Seite heißt „Aufräumen“.
+Stand: 0.5.0, gebaut und getestet gegen Prusa Connect Local **v0.1.0-beta.2**; die Go-Tests laufen auch gegen v0.1.0-beta.1. Die Seite ist englisch mit deutscher Übersetzung; Prusa Connect Local zeigt die Sprache der lesenden Person. Pläne für spätere Versionen stehen in [ROADMAP.md](ROADMAP.md).
 
-Bis 0.1.1 lag die Erweiterung zusammen mit einer Zeitraffer-Erweiterung in einem gemeinsamen Repository, unter einem anderen Modulpfad. Seit 0.2.0 hat sie ein eigenes Repository. Wer 0.1.x nutzt, findet den [Umstieg von 0.1.x](#umstieg-von-01x) weiter unten.
+## Was sie macht
 
-## Was sie kann
-
-- Eine Seite „Aufräumen“ in der Seitenleiste unter Erweiterungen, mit Regeln, Vorschau je Regel, „Jetzt aufräumen“, Speicherbelegung und Verlauf.
-- Jede **Regel** nennt Speicher, Ordner, Modus und Aufbewahrung:
-  - **Dateien:** jede Datei einzeln nach Änderungsdatum, optional mit Muster wie `*.jpg`.
-  - **Ordner:** ganze Ordner auf einer bestimmten Ebene, gealtert nach der neuesten Datei darin. Ein Zeitraffer-Lauf geht so immer komplett.
-  - `keep_newest` schützt die neuesten N Einheiten unabhängig vom Alter.
+- Eine Seite „Aufräumen“ (englisch „Cleanup“) unter Erweiterungen in der Seitenleiste, mit den Regeln, einer Vorschau je Regel, den jetzt fälligen Regeln, der Speicherbelegung und einem Verlauf.
+- Jede **Regel** nennt einen Speicher, einen Ordner, eine Art und wie lange etwas bleibt:
+  - **Dateien:** jede Datei für sich, nach ihrer Änderungszeit, wahlweise gefiltert nach einem Muster wie `*.jpg`.
+  - **Ordner:** ganze Ordner auf einer Ebene, gealtert nach der neuesten Datei darin. Ein Zeitraffer-Lauf geht immer als Ganzes.
+  - `keep_newest` behält die neuesten N Einheiten unabhängig vom Alter.
   - Eine Regel auf die oberste Ebene eines Speichers wird abgelehnt.
-- **Drucker-Regeln** (seit 0.3.0) räumen alte Druckdateien vom eigenen Speicher eines Druckers, etwa seinem USB-Stick. Seit 0.4.0 können sie nur die neuesten N Dateien behalten und löschen nur, was auch im Speicher von Connect Local liegt. Siehe [Speicher eines Druckers](#speicher-eines-druckers).
-- Grenzen pro Scan: 500 000 Einträge, 3 000 Pfade pro Plan, 200 Einträge in der Belegung. Ein abgeschnittener Plan sagt das. Im Ordner-Modus bleiben Ordner, die nicht vollständig gelesen wurden, aus so einem Plan heraus. Sie werden dann weder behalten noch gelöscht.
+- **Drucker-Regeln** räumen alte Druckdateien vom eigenen Speicher eines Druckers, etwa dem USB-Stick. Sie können nur die neuesten N Dateien behalten und nur Dateien löschen, die auch im Speicher von Connect Local liegen. Siehe [Speicher eines Druckers](#speicher-eines-druckers).
+- Grenzen je Durchlauf: 500.000 Einträge, 3.000 Pfade je Plan, 200 Einträge in der Belegung. Ein Plan, der an eine Grenze stieß, sagt das. Im Ordner-Modus bleiben Ordner, die nicht vollständig gelesen wurden, aus einem solchen Plan heraus; sie werden durch ihn weder behalten noch gelöscht.
 
 **Voreingestellte Regeln:**
 
-| Regel | Ort | Behalten | Status |
+| Regel | Wo | Behalten | Zustand |
 |---|---|---|---|
-| Kamera-Snapshots | `local:camera`, `*.jpg` | 14 Tage | aktiv |
-| Zeitraffer | `local:zeitraffer`, Ordner auf Ebene 2 | 180 Tage, die neuesten 10 immer | aktiv |
-| PrintWatch-Snapshots | `local:printwatch`, `*.jpg` | 7 Tage | aus |
+| Camera snapshots | `local:camera`, `*.jpg` | 14 Tage | aktiv |
+| Timelapses | `local:zeitraffer`, Ordner auf Ebene 2 | 180 Tage, die neuesten 10 immer | aktiv |
+| PrintWatch snapshots | `local:printwatch`, `*.jpg` | 7 Tage | aus |
+
+`zeitraffer/` ist der Ordner, in den [pcl-timelapse](https://github.com/Gilbert-1705/pcl-timelapse) standardmäßig schreibt. Die Namen der Regeln lassen sich auf der Seite ändern.
 
 ## Wie gelöscht wird
 
-Das Modulprotokoll von Prusa Connect Local kann Speicher lesen und schreiben, aber nicht löschen. Deshalb gibt es zwei Wege:
+Das Modulprotokoll von Prusa Connect Local kann Speicher lesen und schreiben, aber darin nicht löschen. Diese Erweiterung löscht deshalb selbst nie in einem Speicher. Sie hat keinen API-Zugang und baut keine Netzwerkverbindung auf.
 
-- **Von Hand:** „Jetzt aufräumen“ zeigt vorher Anzahl und Größe und löscht dann im Browser mit den Rechten der angemeldeten Person.
-- **Automatisch, im Speicher:** Der Go-Prozess ruft die HTTP-API des eigenen Servers auf (`POST /api/v1/storages/{storage}/deletions`). Dafür braucht er die Adresse des Servers (`core_url`) und einen API-Zugang mit dem Umfang `operate` (`api_token`). **Ohne Token löscht keine Speicher-Regel automatisch.**
-- **Automatisch, am Drucker** (seit 0.4.0, ab Werk aus): über das Modulprotokoll, als Erweiterung selbst, nur mit `printer_auto` und der Operator-Rolle, die die Administration ihr auf diesem Drucker gibt. Siehe [Automatisch am Drucker aufräumen](#automatisch-am-drucker-aufräumen).
+- **Speicher-Regeln, von Hand:** „Jetzt aufräumen“ an einer Regel oder **„Fällige Regeln ausführen“** für jede aktive Regel, die etwas zu löschen hat. Die Seite zeigt zuerst Anzahl und Größe, plant jede Regel kurz vor dem Löschen noch einmal und löscht aus dem Browser mit den Rechten der angemeldeten Person. Der Server prüft diese Rechte bei jedem Löschen.
+- **Speicher-Regeln, von selbst:** noch nicht. Dafür braucht es einen Löschaufruf im Modulprotokoll; siehe [ROADMAP.md](ROADMAP.md). Bis dahin heißt „aktiv“ bei einer Speicher-Regel: Sie gehört zu „Fällige Regeln ausführen“.
+- **Drucker-Regeln, von selbst** (ab Werk aus): über das Modulprotokoll, als Modul selbst, nur mit `printer_auto` und der Operator-Rolle, die die Administration ihm auf diesem Drucker gegeben hat. Siehe [Automatisches Aufräumen am Drucker](#automatisches-aufräumen-am-drucker).
 
-Löschen ist endgültig. Vor dem ersten Lauf lohnt sich ein Blick in die Vorschau jeder Regel.
+Löschen ist endgültig. Vor dem ersten Lauf die Vorschau jeder Regel prüfen.
 
 ## Speicher eines Druckers
 
 Eine Drucker-Regel nennt einen Drucker, einen Ordner auf seinem Speicher (zum Beispiel `usb`) und ein Muster für Druckdateien (`*.bgcode` oder `*.gcode`). Sie ist bewusst eng gefasst:
 
-- **Ab Werk nur von Hand.** Die Seite liest erst den Drucker („Drucker lesen“), zeigt dann, was weg kann, und löscht nach deiner Bestätigung. Ein automatischer Lauf ist eine Option, die die Administration einschalten muss, siehe [Automatisch am Drucker aufräumen](#automatisch-am-drucker-aufräumen).
-- **Mit deinen Rechten.** Von Hand wird für die angemeldete Person gelesen und gelöscht, die dafür `operate` auf den Drucker braucht.
-- **Nur Druckdateien.** Das Muster muss auf `.bgcode` oder `.gcode` enden. Ordner, schreibgeschützte Dateien und Dateien, für die der Drucker kein Datum meldet, werden nie angeboten.
-- **Nie während eines Drucks.** Läuft ein Druck, wird nichts gelesen und nichts gelöscht. Die Datei des laufenden und des letzten Drucks wird nie angeboten.
-- **Ein Ordner.** Gelesen wird nur der genannte Ordner, nicht die Ordner darunter. Ein Drucker mit Buddy-Firmware beantwortet einen Befehl nach dem anderen und braucht für etwa 300 Dateien 12 bis 15 Sekunden. Das Lesen dauert also etwas und passiert nur auf Knopfdruck.
-- **Nur freigegebene Drucker.** Der Drucker muss in `allowed_devices` stehen. Ab Werk ist die Liste leer, Drucker-Regeln sind also aus, bis jemand einen Drucker einträgt.
+- **Ab Werk von Hand.** Die Seite liest zuerst den Drucker („Drucker lesen“), zeigt dann, was weg würde, und löscht nach Bestätigung. Ein automatischer Lauf ist eine Option, die die Administration einschalten muss, siehe [Automatisches Aufräumen am Drucker](#automatisches-aufräumen-am-drucker).
+- **Mit deinen Rechten.** Von Hand liest und löscht das Modul am Drucker für die angemeldete Person; sie braucht `operate` auf diesem Drucker.
+- **Nur Druckdateien.** Das Muster muss auf `.bgcode` oder `.gcode` enden. Ordner, schreibgeschützte Dateien und Dateien, die der Drucker ohne Datum meldet, werden nie angeboten.
+- **Nie während eines Drucks.** Läuft ein Druck, wird nichts gelesen oder gelöscht. Die Datei des laufenden und des letzten Drucks wird nie angeboten.
+- **Ein Ordner.** Nur der genannte Ordner wird gelesen, nicht die Ordner darunter. Ein Drucker mit Buddy-Firmware beantwortet einen Befehl nach dem anderen und braucht für etwa 300 Dateien 12 bis 15 Sekunden; deshalb dauert das Lesen etwas und geschieht nur auf Knopfdruck.
+- **Nur freigegebene Drucker.** Ein Drucker muss in `allowed_devices` stehen (ab Werk leer, also sind Drucker-Regeln aus, bis die Administration einen Drucker einträgt).
 
-Änderungen am Display des Druckers sieht die Erweiterung beim nächsten Lesen.
+Änderungen am Bildschirm des Druckers erscheinen beim nächsten Lesen.
 
-### Nur die neuesten N behalten, nur löschen, was Connect Local noch hat
+### Die neuesten N behalten, nur löschen, was Connect Local noch hat
 
-Seit 0.4.0 kann eine Drucker-Regel nur die neuesten N Druckdateien behalten (`keep_newest`), ohne Altersgrenze (`keep_days: 0`, nur bei Drucker-Regeln und nur mit `keep_newest` von mindestens 1). Neue Drucker-Regeln starten mit den neuesten 10.
+Eine Drucker-Regel kann nur die neuesten N Druckdateien behalten (`keep_newest`), ohne Altersgrenze (`keep_days: 0`, nur bei Drucker-Regeln und nur mit `keep_newest` von mindestens 1). Neue Drucker-Regeln beginnen mit den neuesten 10.
 
-Ab Werk **löscht eine Drucker-Regel eine Datei außerdem nur, wenn dieselbe Datei in einem Speicher des Servers liegt**: gleicher langer Dateiname (Groß- und Kleinschreibung egal) und gleiche Größe in Byte, im Speicher `copy_storage` unter dem Ordner `copy_path` samt Unterordnern (leer: ganzer Speicher). Das ist normalerweise der Fall, wenn du über Connect Local druckst. Auf der Seite wählst du den Ordner aus einer Liste.
+Ab Werk **löscht eine Drucker-Regel eine Datei nur, wenn dieselbe Datei in einem Speicher des Servers liegt**: gleicher langer Dateiname (ohne Rücksicht auf Groß- und Kleinschreibung) und gleiche Größe in Byte, im Speicher `copy_storage` unter dem Ordner `copy_path` und seinen Unterordnern (leer: der ganze Speicher). Außerdem darf die Kopie höchstens 24 Stunden neuer sein als die Datei auf dem Drucker: Eine echte Kopie wurde hochgeladen, bevor sie zum Drucker ging; eine Datei, die erst danach auftauchte, ist eher eine andere mit gleichem Namen und gleicher Größe. Die 24 Stunden fangen Druckeruhren und FAT-Zeiten ohne Zeitzone ab. Das ist normalerweise bei Dateien der Fall, die über Connect Local an den Drucker gingen. Den Ordner wählst du auf der Seite aus einer Liste.
 
-- Eine Datei **ohne** solche Kopie (etwa direkt aus dem Slicer auf den Stick kopiert) zählt trotzdem zu den neuesten N, wird aber nie gelöscht. Sonst würden ältere Dateien mit Kopie nachrücken und an ihrer Stelle gehen. Die Vorschau zeigt diese Dateien getrennt („keine Kopie in Connect Local“).
-- Lassen sich die Kopien nicht vollständig lesen (Speicher nicht lesbar, Ordner fehlt, Scan an seiner Grenze abgeschnitten), wird **nichts** gelöscht.
+- Eine Datei **ohne** solche Kopie (etwa direkt aus dem Slicer auf den Stick kopiert) zählt trotzdem zu den neuesten N, wird aber nie gelöscht. Sonst rückten ältere Dateien mit Kopie nach und gingen stattdessen. Die Vorschau listet diese Dateien gesondert.
+- Lassen sich die Kopien nicht vollständig lesen (Speicher nicht lesbar, Ordner fehlt, Durchlauf an seiner Grenze abgeschnitten), wird **nichts** gelöscht.
 - Die Kopien werden mit den Rechten der Person auf der Seite gelesen, und nur, wenn die Regel überhaupt etwas löschen würde.
-- Für eine Regel, die von Hand läuft, lässt sich der Abgleich ausschalten (`skip_copy_check`). Eine aktive Regel gleicht immer ab.
+- Für eine Regel, die von Hand läuft, lässt sich der Kopie-Abgleich abschalten (`skip_copy_check`). Eine aktive Regel prüft immer.
 
-Der Kopie-Speicher muss in `allowed_storages` stehen. Eine mit 0.3.0 gespeicherte Drucker-Regel hat noch keinen Kopie-Speicher: Sie lädt weiter, löscht aber nichts, bis du sie bearbeitest und speicherst.
+Der Kopie-Speicher muss in `allowed_storages` stehen.
 
-### Automatisch am Drucker aufräumen
+**Was der Kopie-Abgleich nicht kann.** Verglichen werden nur Name, Größe und Zeit. Das Modulprotokoll liefert keine Prüfsumme einer Datei auf dem Drucker und keine Möglichkeit, sie zu lesen; der Inhalt selbst wird also nicht verglichen. Wer auf `copy_storage` schreiben darf, kann deshalb eine Datei mit gleichem Namen und gleicher Größe ablegen, eine Druckdatei auf dem Drucker damit als gesichert erscheinen lassen, und eine Drucker-Regel löscht sie dann womöglich. Als Kopie-Speicher nur einen wählen, auf den ausschließlich vertrauenswürdige Personen schreiben dürfen. Ein Abgleich per Prüfsumme steht in der [Roadmap](ROADMAP.md).
 
-Ab Werk aus. Schaltet die Administration es ein, laufen aktive Drucker-Regeln zusätzlich alle `auto_interval`. Weil in dem Moment niemand angemeldet ist, liest und löscht die Erweiterung **als sie selbst**, über das Modulprotokoll (`device.files`, `device.command` mit `delete_file`). Ein API-Token braucht sie dafür nicht. Jeder dieser Punkte muss erfüllt sein, sonst wird die Regel ausgelassen und die Seite sagt, warum:
+### Automatisches Aufräumen am Drucker
+
+Ab Werk aus. Schaltet die Administration es ein, laufen aktive Drucker-Regeln zusätzlich alle `auto_interval`. Weil in dem Moment niemand angemeldet ist, liest und löscht das Modul **als es selbst**, über das Modulprotokoll (`device.files`, `device.command` mit `delete_file`). Jede dieser Bedingungen muss gelten, sonst wird die Regel ausgelassen und die Seite sagt, warum:
 
 1. `printer_auto` ist an und `auto_interval` gesetzt.
-2. Der Drucker steht in `allowed_devices`, der Kopie-Speicher in `allowed_storages`, und die Regel ist aktiv. Eine aktive Drucker-Regel gleicht immer mit den Kopien ab.
-3. Die Person, die die Regel zuletzt gespeichert hat, darf den Drucker weiter bedienen (vor jedem Lauf gefragt).
-4. **Die Administration hat die Erweiterung zum Operator dieses Druckers gemacht.** Bis dahin hat die Instanz kein Recht auf irgendeinen Drucker; `-approve` vergibt das nicht. Mit dem Standard-Namen der Instanz:
+2. Der Drucker steht in `allowed_devices`, der Kopie-Speicher in `allowed_storages`, und die Regel ist aktiv. Eine aktive Drucker-Regel prüft immer auf Kopien.
+3. Die Person, die die Regel zuletzt gespeichert hat, darf den Drucker noch bedienen (vor jedem Lauf gefragt).
+4. **Die Administration hat das Modul zum Operator dieses Druckers gemacht.** Bis dahin hat die Instanz des Moduls auf keinem Drucker ein Recht; `-approve` gibt es nicht. Mit dem Standard-Instanznamen:
 
    ```
    POST /api/v1/grants/device/{device_id}
@@ -80,121 +82,116 @@ Ab Werk aus. Schaltet die Administration es ein, laufen aktive Drucker-Regeln zu
    Zurücknehmen mit `DELETE /api/v1/grants/device/{device_id}?relation=operator&subject=sink:cleanup`.
 5. Der Drucker ist verbunden und druckt nicht, sein Ordner wurde frisch gelesen, und die Kopien wurden vollständig gelesen.
 
-Jeder Lauf löscht höchstens `printer_auto_max` Dateien je Regel (Standard 50), die ältesten zuerst. Direkt vor jeder Datei fragt er die Druckaufträge erneut ab und hört auf, wenn ein Druck begonnen hat oder die Datei zu der des laufenden oder letzten Drucks geworden ist. Jede gelöschte Datei steht im Verlauf.
+Jeder Lauf löscht höchstens `printer_auto_max` Dateien je Regel (Standard 50), die ältesten zuerst. Direkt vor jeder Datei fragt er die Aufträge des Druckers erneut und hört auf, wenn ein Druck begonnen hat oder die Datei zu der des laufenden oder letzten Drucks wurde. Jede gelöschte Datei steht im Verlauf.
 
-**Erst ein Probelauf.** `printer_auto_dry_run` ist ab Werk an: Der automatische Lauf löscht dann nichts und schreibt nur in den Verlauf, welche Dateien er gelöscht hätte. Ausschalten, wenn die Liste stimmt.
+**Erst Probelauf.** `printer_auto_dry_run` ist ab Werk an: Der automatische Lauf löscht dann nichts und schreibt nur in den Verlauf, welche Dateien er gelöscht hätte. Ausschalten, wenn die Liste stimmt.
 
-**Das Risiko, offen gesagt.** Die Operator-Rolle auf einem Drucker ist mehr als Dateien löschen: Mit ihr könnte die Erweiterung auch Drucke starten, pausieren oder abbrechen und andere Befehle senden. Diese Erweiterung listet nur Dateien, liest die Druckaufträge und sendet `delete_file`, aber die Freigabe selbst beschränkt sie nicht darauf. Nur einschalten, wenn du das in Kauf nimmst, und nur auf den Druckern freigeben, die du brauchst. Ohne Freigabe und `printer_auto` bleiben Drucker-Regeln Handarbeit.
+**Das Risiko, offen gesagt.** Die Operator-Rolle auf einem Drucker ist mehr als Dateien löschen: Damit könnte das Modul auch Drucke starten, pausieren oder abbrechen und andere Befehle senden. Dieses Modul listet nur Dateien, liest die Aufträge und sendet `delete_file`, aber die Freigabe selbst begrenzt es nicht darauf. Nur einschalten, wenn du das akzeptierst, und nur auf den Druckern freigeben, die du brauchst. Ohne Freigabe und `printer_auto` bleiben Drucker-Regeln von Hand.
 
 ## Einstellungen
 
-Unter Settings → Extensions → Aufräumen:
+Unter Einstellungen → Erweiterungen → Cleanup. Die Beschreibungen dort sind englisch, weil Prusa Connect Local sie als reinen Text aus `module.yaml` liest.
 
 | Einstellung | Standard | Bedeutung |
 |---|---|---|
-| `core_url` | `http://127.0.0.1:8080` | Adresse des Servers aus Sicht des Moduls. Muss dieser Rechner sein (`127.0.0.1`, `::1` oder `localhost`); läuft der Server auf einem anderen Port, den Port anpassen. Andere Hosts werden abgelehnt, Weiterleitungen nicht befolgt. |
-| `api_token` | leer | API-Zugang mit Umfang `operate` (Einstellungen → API-Zugangsdaten). Wird als Secret gespeichert. |
-| `auto_interval` | `0s` | Wie oft die aktiven Regeln automatisch laufen, z. B. `6h`. `0s` schaltet das aus. Speicher-Regeln brauchen dazu `api_token`, Drucker-Regeln `printer_auto`. |
-| `allowed_storages` | `["local"]` | Die Speicher, auf die Regeln zeigen dürfen. `"*"` erlaubt alle. Alles andere wird weder gespeichert noch aufgeräumt, und die Belegung zeigt nur diese. |
-| `allowed_devices` | `[]` | Die Drucker (IDs), auf deren eigenem Speicher Drucker-Regeln aufräumen dürfen. `"*"` erlaubt alle, leer keinen. |
-| `printer_auto` | `false` | Drucker-Regeln dürfen aktiv sein und laufen alle `auto_interval`. Siehe [Automatisch am Drucker aufräumen](#automatisch-am-drucker-aufräumen). |
+| `auto_interval` | `0s` | Wie oft die aktiven Drucker-Regeln von selbst laufen, z. B. `6h`. `0s` schaltet das aus. Braucht `printer_auto`. Speicher-Regeln laufen nur von der Seite aus. |
+| `allowed_storages` | `["local"]` | Die Speicher, auf die Regeln zeigen dürfen. `"*"` erlaubt alle. Anderes wird weder gespeichert noch ausgeführt, und die Belegung zeigt nur diese. |
+| `allowed_devices` | `[]` | Die Drucker (IDs), deren eigenen Speicher Drucker-Regeln aufräumen dürfen. `"*"` erlaubt alle, leer keinen. |
+| `printer_auto` | `false` | Drucker-Regeln dürfen aktiv sein und laufen alle `auto_interval`. Siehe [Automatisches Aufräumen am Drucker](#automatisches-aufräumen-am-drucker). |
 | `printer_auto_max` | `50` | Höchstens so viele Dateien je Drucker-Regel und automatischem Lauf, 1 bis 500. |
-| `printer_auto_dry_run` | `true` | Der automatische Drucker-Lauf notiert nur, was er löschen würde. |
+| `printer_auto_dry_run` | `true` | Der automatische Drucker-Lauf schreibt nur auf, was er löschen würde. |
 
-Berechtigungen des Moduls: `read_storage` und ein eigener Datenordner (`regeln.json`, `verlauf.json`). Auf Druckern hat es nichts, außer die Administration gibt ihm für den automatischen Drucker-Lauf die Operator-Rolle. Dazu fragt es den Server zwei Dinge, die es selbst nie tut (`checks: write_storage, operate`), auch für Personen, die gerade nicht angemeldet sind (`check_absent_people`). Siehe unten.
+Rechte, um die das Modul bittet: `read_storage` und ein eigener Datenordner (`regeln.json`, `verlauf.json`). Es meldet keine Netzwerkverbindung an (`egress`). Auf Druckern hat es nichts, solange die Administration ihm für den automatischen Drucker-Lauf nicht die Operator-Rolle gibt. Außerdem stellt es dem Server drei Fragen, nach denen es selbst nie handelt (`checks: write_storage, operate, observe`), auch für Personen, die gerade nicht angemeldet sind (`check_absent_people`). Siehe unten.
 
-### Berechtigungen und der API-Token
+### Berechtigungen
 
-Prusa Connect Local schützt die Routen des Moduls: Lesen (`GET`) braucht `view_resource` auf die Erweiterung, alles andere `operate_resource`. Der automatische Lauf löscht mit dem API-Token, und der kann mehr dürfen als die Personen, die Regeln anlegen. Zwei Schichten verhindern, dass eine Regel mehr löscht, als ihr Urheber von Hand löschen dürfte:
+Prusa Connect Local schützt die Routen des Moduls: Lesen (`GET`) braucht `view_resource` auf die Erweiterung, alles andere `operate_resource`. Zwei Ebenen verhindern, dass eine Regel mehr löscht, als ihre Autorin oder ihr Autor von Hand löschen könnte:
 
 1. **Die Listen der Administration.** Regeln dürfen nur auf die Speicher in `allowed_storages` und die Drucker in `allowed_devices` zeigen. Ändern kann sie nur, wer die Erweiterung konfigurieren darf.
-2. **Die eigenen Rechte des Urhebers.** Speichert jemand eine neue oder geänderte Regel, fragt die Erweiterung den Server, ob diese Person dort löschen darf (`write_storage` für Speicher, `operate` für den Drucker). Sonst wird die Regel abgelehnt. Die Regel merkt sich, wer sie gespeichert hat. Vor jedem automatischen Lauf fragt die Erweiterung erneut für diese Person und lässt die Regel aus, wenn sie dort nicht mehr löschen darf oder der Server keine Antwort gibt. Die Seite zeigt, warum eine Regel ausgelassen wurde.
+2. **Die eigenen Rechte der Person.** Speichert jemand eine neue oder geänderte Regel, fragt das Modul den Server, ob diese Person dort löschen darf (`write_storage` bei Speichern, `operate` am Drucker), und lehnt die Regel sonst ab. Die Regel merkt sich, wer sie gespeichert hat. Vor jedem automatischen Drucker-Lauf fragt das Modul für diese Person erneut und lässt die Regel aus, wenn sie den Drucker nicht mehr bedienen darf oder der Server nicht antwortet. Die Seite zeigt, warum eine Regel ausgelassen wurde.
 
-Eine Regel, die seit 0.3.0 niemand gespeichert hat, etwa die Voreinstellungen oder Regeln aus einer älteren Version, hat noch keinen Urheber. Von Hand funktioniert sie weiter. Automatisch läuft sie aber erst, wenn jemand mit Löschrecht sie einmal gespeichert hat.
+Zwei Regeln dürfen nicht gleich heißen. Eine Regel zu entfernen braucht dasselbe Recht, wie sie zu ändern; niemand entfernt also eine Regel, die er nicht hätte speichern können. Beim Speichern nennt die Seite die Liste, auf der sie aufbaut (`If-Match` mit der `rules_version` der Übersicht); hat inzwischen jemand anderes gespeichert, wird abgelehnt und die Seite lädt die neue Liste.
+
+**Wer was sieht.** Wer die Erweiterung öffnen darf, sieht die Speicher-Regeln, die Belegung und den Verlauf des Aufräumens von Hand. Was von einem Drucker kommt oder ihn nennt, sieht nur, wer diesen Drucker sehen darf (`observe`): die Drucker-Regel selbst, die Dateien, die ein automatischer Lauf dort gelöscht hat, und warum ein Lauf sie ausgelassen hat. Alle anderen sehen die Regel nur mit Namen, markiert als „kein Zugriff“, und können die übrigen Regeln trotzdem speichern. Wer eine Regel gespeichert hat, sieht nur, wer dort löschen darf; wer von Hand aufgeräumt hat, sieht nur diese Person selbst und wer dort löschen darf, alle anderen lesen „von Hand“. Antwortet der Server nicht, wird davon nichts gezeigt.
+
+Eine Regel, die noch niemand gespeichert hat, etwa eine voreingestellte, hat keine Autorin und keinen Autor. Sie funktioniert von Hand, eine Drucker-Regel läuft aber erst von selbst, nachdem jemand mit dem Recht, diesen Drucker zu bedienen, sie einmal gespeichert hat.
 
 Grenzen, die man kennen sollte:
 
-- In Prusa Connect Local v0.1.0-beta.1 gilt `write_storage` für alle Speicher zusammen, nicht je Speicher. Auf einzelne Speicher eingegrenzt wird es durch `allowed_storages`.
-- Auf der Seite (Vorschau, Belegung, Ordner) wird mit den Rechten der angemeldeten Person gelesen. Der automatische Lauf liest Speicher mit dem eigenen Recht `read_storage` des Moduls und Drucker nur mit der Operator-Rolle, die die Administration ihm gegeben hat (siehe oben).
-- Den Token für ein Konto mit möglichst wenig Rechten anlegen, oder `api_token` leer lassen und nur von Hand aufräumen.
+- Bis Prusa Connect Local v0.1.0-beta.2 gilt `write_storage` für alle Speicher zusammen, nicht je Speicher. Erst `allowed_storages` grenzt auf einzelne Speicher ein.
+- Gelesen wird auf der Seite (Vorschau, Belegung, Ordner) mit den Rechten der angemeldeten Person. Der automatische Drucker-Lauf liest Speicher mit dem eigenen `read_storage` des Moduls und Drucker nur mit der Operator-Rolle, die die Administration ihm gegeben hat (siehe oben).
 
 ## Installation
+
+Über den Prusa Plugin Marketplace, sobald sie dort gelistet ist, oder aus einem Release:
 
 ```sh
 make core
 make release
-prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.1 -from release/cleanup -approve
+prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.5.0 -from release/cleanup -approve
 ```
 
-Ein Update erkennt Prusa Connect Local nur an der Version. Jede Änderung hebt sie deshalb in `module.yaml`, `main.go` (`release`), `openapi.json` und `ui/package.json` an. Nach einem Update den Server einmal neu starten, weil er den Browser-Teil nur beim Start lädt.
+Prusa Connect Local erkennt ein Update nur an der Version; jede Änderung hebt sie deshalb in `module.yaml`, `main.go` (`release`), `openapi.json` und `ui/package.json`. Nach einem Update den Server einmal neu starten, weil er den Browser-Teil nur beim Start lädt.
 
-### Umstieg von 0.3.x
+### Update von 0.4.x
 
-0.4.0 ist ein Update desselben Moduls. Es fragt zusätzlich `device.command` an (nur für den optionalen automatischen Drucker-Lauf) und hat drei neue Einstellungen, alle mit sicheren Standardwerten: `printer_auto` aus, `printer_auto_max` 50, `printer_auto_dry_run` an. Fragt das Update sie nicht ab, gelten diese Standardwerte.
+0.5.0 entfernt die Einstellungen `api_token` und `core_url`, weil Speicher-Regeln nicht mehr über die HTTP-API des Servers löschen. Der Server lehnt Einstellungen ab, die ein Modul nicht mehr kennt; **deshalb beide Schlüssel vor dem Update aus den Einstellungen der Erweiterung entfernen.** Danach den API-Zugang, den du für diese Erweiterung angelegt hattest, unter Einstellungen → API-Zugangsdaten löschen. Regeln und Verlauf bleiben, wie sie sind.
 
-1. Jede Drucker-Regel einmal bearbeiten: Speicher und Ordner mit den Kopien wählen oder den Abgleich für diese Regel ausschalten. Bis dahin löscht die Regel nichts und sagt das.
-2. Nur wenn der automatische Drucker-Lauf gewünscht ist: `printer_auto` einschalten, `auto_interval` setzen, der Erweiterung die Operator-Rolle auf dem Drucker geben (siehe oben), die Regel aktiv schalten und die Probeläufe im Verlauf prüfen, bevor `printer_auto_dry_run` ausgeschaltet wird.
-
-### Umstieg von 0.2.x
-
-0.3.0 ist ein Update desselben Moduls, fragt aber mehr an als 0.2.x: die zwei Prüfungen (`write_storage`, `operate`) und `check_absent_people`. Beim Update darauf achten, dass sie gewährt werden (auf der Kommandozeile: `-approve`). Ohne sie scheitert das Speichern einer Regel mit „the server could not say whether … may delete there“, und der automatische Lauf lässt jede Regel aus. Danach:
-
-1. `allowed_storages` prüfen: Ab Werk steht dort `["local"]`. Jeden Speicher eintragen, den die Regeln nutzen, oder `"*"`.
-2. Auf der Seite jede Regel, die automatisch laufen soll, einmal speichern, als Person mit Löschrecht dort. Bis dahin lässt der automatische Lauf sie aus und sagt das.
-3. Für Drucker-Regeln die ID des Druckers in `allowed_devices` eintragen.
-
-### Umstieg von 0.1.x
-
-Ab 0.2.0 hat die Erweiterung einen neuen Modulpfad und den Modulnamen `cleanup` statt `aufraeumen`. Für Prusa Connect Local ist sie damit ein neues Modul und kein Update. Die alte Installation läuft so lange weiter, bis sie entfernt wird.
-
-1. Die aktuelle Version wie oben installieren.
-2. Wenn die Regeln bleiben sollen: `module-data/aufraeumen/regeln.json` nach `module-data/cleanup/regeln.json` kopieren und den Server neu starten.
-3. Die Einstellungen bei der neuen Erweiterung eintragen und die Regeln einmal speichern (siehe oben).
-4. Die alte Installation entfernen: `prusa-connect module remove <früherer Modulpfad>`. Ihr Datenordner `module-data/aufraeumen` bleibt liegen und kann danach weg.
-
-Bis Schritt 4 nicht beide automatisch laufen lassen. Wer `core.modules_local` nutzt, trägt dort den neuen Modulpfad ein.
-
-## Selbst bauen
+## Bauen
 
 ```sh
-make core      # Prusa Connect Local v0.1.0-beta.1 nach .core holen, Bibliotheken bauen
+make core      # Prusa Connect Local v0.1.0-beta.2 nach .core holen, Commit prüfen, Bibliotheken bauen
 make test      # Go-Tests und svelte-check
 make release   # release/cleanup/ und release/cleanup-<version>.tar.gz
 ```
 
-Nötig sind Go 1.26, Node 22, pnpm 11 und git. `ui/pnpm-workspace.yaml` nimmt neue Paketversionen erst nach sieben Tagen an und indirekte Abhängigkeiten nur aus der Registry.
+Braucht Go 1.26, Node 22, pnpm 11 und git. `make core` bricht ab, wenn `.core` nicht auf dem Commit steht, den `CORE_SHA` nennt, denn ein Tag lässt sich verschieben; CI und Marketplace-Builder laufen durch dieselbe Prüfung. `ui/pnpm-workspace.yaml` nimmt neue Paketversionen erst nach sieben Tagen an und indirekte Abhängigkeiten nur aus der Registry.
+
+## Übersetzungen
+
+Die Texte der Seite liegen in `ui/src/locales/`: `en.json` ist die Quelle, `de.json` die deutsche Übersetzung. Fehlt einer Sprache ein Schlüssel, erscheint der englische Text. Für eine neue Sprache `en.json` nach `<sprache>.json` kopieren, die Werte übersetzen und die Schlüssel sowie die Teile `{name}` und `{count, plural, …}` unverändert lassen. Die Texte in `module.yaml` (Titel, Kurztext, Einstellungen) gibt es nur englisch, weil Prusa Connect Local sie als reinen Text liest.
 
 ## Aufbau
 
 | Datei | Inhalt |
 |---|---|
-| `main.go` | Start, Einstellungen, Routen des Moduls |
-| `rules.go` | Regeln, Voreinstellung, Prüfung |
-| `policy.go` | Listen der Administration und Rechte des Urhebers |
-| `plan.go` | Was eine Regel jetzt löschen würde, Speicherbelegung |
+| `main.go` | Start, die Routen des Moduls, der Zeitplan des Drucker-Laufs |
+| `rules.go` | Regeln, Voreinstellungen, Prüfung |
+| `policy.go` | die Listen der Administration und die Rechte der Person |
+| `visibility.go` | was die Übersicht einer Person zeigt |
+| `plan.go` | was eine Regel jetzt löschen würde, Speicherbelegung |
 | `printer.go` | Drucker-Regeln: den Speicher eines Druckers lesen |
 | `copies.go` | Drucker-Regeln: die Kopien auf dem Server, die Ordnerliste |
 | `auto_printer.go` | der optionale automatische Lauf für Drucker-Regeln |
-| `cleaner.go` | Einstellungen, Verlauf, Löschen über die HTTP-API |
-| `ui/` | Seite „Aufräumen“ (Svelte 5, `@prusa/connect-ui`) |
+| `cleaner.go` | Einstellungen und Verlauf |
+| `ui/` | die Seite „Cleanup“ (Svelte 5, `@prusa/connect-ui`), mit `ui/src/locales/` |
 
-Die Routen liegen unter `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`. Die Tabelle steht in der englischen [README.md](README.md#layout).
+Routen unter `/api/v1/modules/com.github.aux.gilbert-1705.pcl-cleanup/`:
+
+| Route | Zweck |
+|---|---|
+| `GET /overview` | Regeln, Einstellungen, Verlauf |
+| `PUT /rules` | Regeln speichern (mit `If-Match`, gegen die Rechte der Person geprüft) |
+| `GET /plan?rule=…` | was eine Regel jetzt löschen würde (eine Drucker-Regel nur einzeln angefragt) |
+| `GET /usage?storage=…` | Belegung je Ordner der obersten Ebene |
+| `GET /folders?storage=…&path=…` | die Ordner eine Ebene unter einem Pfad, für die Wahl des Kopie-Ordners |
+| `POST /runs` | einen Lauf von der Seite in den Verlauf schreiben |
+| `POST /auto/run` | den automatischen Drucker-Lauf jetzt starten |
+
+`/state`, `/openapi.json` und `/ui/` belegt der Server, daher `/overview`.
 
 ## Änderungen
 
-- **0.4.1:** Veröffentlichung über den Prusa Plugin Marketplace: `require.core`, englischer Titel und Kurztext, `CHANGELOG.md`, Release-Workflow. `core_url` muss auf diesen Rechner zeigen (127.0.0.1, ::1, localhost), und der Client folgt keinen Weiterleitungen mehr.
-- **0.4.0:** Drucker-Regeln behalten die neuesten N (`keep_days: 0`) und löschen ab Werk nur Dateien mit Kopie auf dem Server (gleicher Name und gleiche Größe). Optionaler automatischer Lauf für Drucker-Regeln (`printer_auto`, aus), mit Obergrenze je Lauf und einem Probelauf, der ab Werk an ist.
-- **0.3.0:** Drucker-Regeln für den eigenen Speicher eines Druckers (von Hand). Regeln merken sich, wer sie gespeichert hat; Speichern und jeder automatische Lauf prüfen die eigenen Rechte dieser Person. Neue Einstellungen `allowed_storages` und `allowed_devices`. Die Seite liest Speicher mit den Rechten der angemeldeten Person. Der Verlauf nimmt nur Läufe vorhandener Regeln an.
-- **0.2.0:** Eigenes Repository, neuer Modulpfad. Im Ordner-Modus zählt ein an seiner Grenze abgeschnittener Scan nicht gelesene Ordner nicht mehr als alt. Die Seite löscht im Speicher des Plans, den sie gelesen hat.
+Siehe [CHANGELOG.md](CHANGELOG.md) (englisch).
 
 ## Sicherheit
 
-Sicherheitslücken bitte nicht als öffentliches Issue melden, sondern wie in [SECURITY.md](SECURITY.md) beschrieben.
+Sicherheitsprobleme bitte nicht in öffentlichen Issues melden. Siehe [SECURITY.md](SECURITY.md).
 
-Bei jedem Push, jedem Pull Request und einmal pro Woche laufen in CI Gitleaks (Secrets, auch in der Git-Historie), Trivy (bekannte Schwachstellen, Fehlkonfiguration, Secrets) und Semgrep (statische Analyse). Lokal geht dasselbe mit `./scripts/security-review.sh`, und `pre-commit install` prüft vor jedem Commit mit Gitleaks.
+Bei jedem Push, jedem Pull Request und einmal pro Woche laufen in der CI Gitleaks (Secrets, auch in der Git-Historie), Trivy (bekannte Schwachstellen, Fehlkonfiguration, Secrets) und Semgrep (statische Analyse). Bei jedem Push und Pull Request laufen außerdem `go vet`, die Go-Tests, ein Cross-Build und `svelte-check`. Lokal laufen dieselben Scans mit `./scripts/security-review.sh`, und `pre-commit install` ergänzt eine Gitleaks-Prüfung vor jedem Commit.
 
 ## Lizenz
 
 MIT, siehe [LICENSE](LICENSE).
 
-Gebaut auf Prusa Connect Local von Prusa Research a.s. Prusa Connect Local selbst steht unter OCL v1.1 mit Zusätzen, siehe dessen Repository. Dieses Repository enthält keinen Code davon: `make core` holt ihn nach `.core`, das nicht eingecheckt wird. Ein gebautes Release enthält aber Teile davon (das Go-SDK im Binary, `@prusa/connect-ui` im Bündel der Seite).
+Gebaut auf Prusa Connect Local von Prusa Research a.s. Prusa Connect Local selbst steht unter OCL v1.1 mit Zusätzen, siehe dessen Repository. Dieses Repository enthält keinen Code davon; `make core` holt ihn nach `.core`, das nicht eingecheckt wird. Ein gebautes Release enthält Teile davon (das Go-SDK im Programm, `@prusa/connect-ui` im Bündel der Seite).

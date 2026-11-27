@@ -12,6 +12,7 @@
   import {
     allowed,
     bytes,
+    CallError,
     deletePaths,
     deletePrinterFiles,
     type Folders,
@@ -32,12 +33,14 @@
   import { heldHost } from '../host';
 
   const host = heldHost();
+  const t = host.t;
 
   let current = $state<State | undefined>(undefined);
   let plans = $state<Record<string, RulePlan>>({});
   let scanning = $state(false);
   let problem = $state('');
   let notice = $state('');
+  // The rule being cleaned, '*' for the printer run, 'due' for the due rules.
   let busyRule = $state('');
   let progress = $state('');
 
@@ -51,7 +54,7 @@
   let usage = $state<Usage | undefined>(undefined);
   let usageBusy = $state(false);
 
-  // Ordnerauswahl für die Kopien einer Drucker-Regel.
+  // Folder picker for the copies of a printer rule.
   let picker = $state<Folders | undefined>(undefined);
   let pickerBusy = $state(false);
 
@@ -60,7 +63,7 @@
       current = await readState(host);
       problem = current.error ?? '';
     } catch (error) {
-      problem = `Der Zustand konnte nicht gelesen werden: ${String(error)}`;
+      problem = t('error.state', { detail: String(error) });
     }
   };
 
@@ -70,7 +73,7 @@
       const list = await readPlans(host);
       plans = Object.fromEntries(list.map((plan) => [plan.rule_id, plan]));
     } catch (error) {
-      problem = `Die Ordner konnten nicht durchsucht werden: ${String(error)}`;
+      problem = t('error.scan', { detail: String(error) });
     } finally {
       scanning = false;
     }
@@ -82,15 +85,15 @@
     try {
       usage = await readUsage(host, usageStorage, refresh);
     } catch (error) {
-      problem = `Die Speicherbelegung konnte nicht gelesen werden: ${String(error)}`;
+      problem = t('error.usage', { detail: String(error) });
     } finally {
       usageBusy = false;
     }
   };
 
-  // Nur was die Einstellungen der Erweiterung zulassen (allowed_storages,
-  // allowed_devices), und bei Druckern nur die, die die angemeldete Person
-  // bedienen darf: Gelöscht wird dort mit ihren Rechten.
+  // Only what the extension's settings allow (allowed_storages,
+  // allowed_devices), and of the printers only those the signed-in person may
+  // operate: deleting there happens with their rights.
   const loadPlaces = async (): Promise<void> => {
     try {
       const answer = await host.client.listStorages();
@@ -129,7 +132,20 @@
   const printerName = (id: string | undefined): string =>
     printers.find((p) => p.id === id)?.name ?? id ?? '';
 
-  // Den Drucker lesen dauert und belegt ihn, deshalb nur auf Knopfdruck.
+  // Active storage rules whose plan, made with the reader's rights, has
+  // something to delete. Printer rules are read one by one and have their own
+  // automatic run, so they are not part of this.
+  const dueRules = $derived(
+    (current?.rules ?? []).filter((rule) => {
+      if (rule.target === 'printer' || !rule.enabled) return false;
+      const plan = plans[rule.id];
+
+      return plan !== undefined && !plan.error && !plan.lazy && plan.delete_units > 0;
+    }),
+  );
+  const dueSize = $derived(dueRules.reduce((sum, rule) => sum + (plans[rule.id]?.delete_size ?? 0), 0));
+
+  // Reading the printer takes a while and occupies it, so only on request.
   const readPrinter = async (rule: Rule): Promise<void> => {
     reading = rule.id;
     try {
@@ -142,57 +158,93 @@
     }
   };
 
+  const unitsOf = (rule: Rule, count: number): string =>
+    t(rule.target !== 'printer' && rule.mode === 'folders' ? 'units.folders' : 'units.files', { count });
+
+  // Plans one rule again, deletes what the plan names with the reader's own
+  // rights and writes the run to the history. Answers the space freed and a
+  // line for the reader.
+  const deleteFor = async (rule: Rule): Promise<{ freed: number; text: string }> => {
+    progress = t('progress.searching');
+
+    const plan = await readPlan(host, rule.id);
+    const paths = plan?.delete ?? [];
+    if (!plan || paths.length === 0) return { freed: 0, text: t('notice.nothing', { rule: rule.name }) };
+
+    let failure = '';
+    let done = 0;
+    const step = (n: number): void => {
+      progress = t('progress.deleted', { rule: rule.name, done: n, total: paths.length });
+    };
+    try {
+      done =
+        plan.target === 'printer'
+          ? await deletePrinterFiles(host, plan.device ?? '', paths, step)
+          : await deletePaths(host, plan.storage ?? '', paths, step);
+    } catch (error) {
+      failure = String(error);
+    }
+
+    const share = plan.delete_units > 0 ? done / plan.delete_units : 0;
+    const record = {
+      rule: rule.name,
+      units: done,
+      files: Math.round(plan.delete_files * share),
+      freed: Math.round(plan.delete_size * share),
+      partial: Boolean(plan.truncated) || done < paths.length,
+      ...(failure ? { error: failure } : {}),
+    };
+    await recordRun(host, record);
+
+    const text = failure
+      ? t('notice.failed', { rule: rule.name, count: done, detail: failure })
+      : t(record.partial ? 'notice.doneMore' : 'notice.done', { rule: rule.name, count: done, size: bytes(record.freed) });
+
+    return { freed: record.freed, text };
+  };
+
+  const finish = async (): Promise<void> => {
+    busyRule = '';
+    progress = '';
+    await load();
+    await scan();
+    await loadUsage(true);
+  };
+
   const clean = async (rule: Rule): Promise<void> => {
     busyRule = rule.id;
     notice = '';
     problem = '';
-    progress = 'Suche, was weg kann …';
 
     try {
-      const plan = await readPlan(host, rule.id);
-      const paths = plan?.delete ?? [];
-      if (!plan || paths.length === 0) {
-        notice = `${rule.name}: nichts zu löschen.`;
-
-        return;
-      }
-
-      let failure = '';
-      let done = 0;
-      const step = (n: number): void => {
-        progress = `${n} von ${paths.length} gelöscht …`;
-      };
-      try {
-        done =
-          plan.target === 'printer'
-            ? await deletePrinterFiles(host, plan.device ?? '', paths, step)
-            : await deletePaths(host, plan.storage ?? '', paths, step);
-      } catch (error) {
-        failure = String(error);
-      }
-
-      const share = plan.delete_units > 0 ? done / plan.delete_units : 0;
-      const record = {
-        rule: rule.name,
-        units: done,
-        files: Math.round(plan.delete_files * share),
-        freed: Math.round(plan.delete_size * share),
-        partial: Boolean(plan.truncated) || done < paths.length,
-        ...(failure ? { error: failure } : {}),
-      };
-      await recordRun(host, record);
-
-      notice = failure
-        ? `${rule.name}: ${done} gelöscht, dann Fehler: ${failure}`
-        : `${rule.name}: ${done} gelöscht, ${bytes(record.freed)} frei.${record.partial ? ' Es ist noch mehr da, einfach erneut ausführen.' : ''}`;
+      notice = (await deleteFor(rule)).text;
     } catch (error) {
       problem = String(error);
     } finally {
-      busyRule = '';
-      progress = '';
-      await load();
-      await scan();
-      await loadUsage(true);
+      await finish();
+    }
+  };
+
+  // One rule after the other, each planned again just before it deletes.
+  const runDue = async (): Promise<void> => {
+    const rules = [...dueRules];
+    busyRule = 'due';
+    notice = '';
+    problem = '';
+
+    let freed = 0;
+    const lines: string[] = [];
+    try {
+      for (const rule of rules) {
+        const result = await deleteFor(rule);
+        freed += result.freed;
+        lines.push(result.text);
+      }
+    } catch (error) {
+      problem = String(error);
+    } finally {
+      notice = [t('notice.dueDone', { count: lines.length, size: bytes(freed) }), ...lines].join(' ');
+      await finish();
     }
   };
 
@@ -200,7 +252,7 @@
     busyRule = '*';
     try {
       const answer = await runNow(host);
-      notice = `Automatischer Lauf: ${answer.runs.length} Regeln ausgeführt.`;
+      notice = t('notice.printerRun', { count: answer.runs.length });
     } catch (error) {
       problem = String(error);
     } finally {
@@ -216,7 +268,7 @@
     try {
       picker = await readFolders(host, editing.copy_storage, path);
     } catch (error) {
-      problem = `Die Ordner konnten nicht gelesen werden: ${String(error)}`;
+      problem = t('error.folders', { detail: String(error) });
     } finally {
       pickerBusy = false;
     }
@@ -229,12 +281,12 @@
     picker = undefined;
   };
 
-  // Kopie-Abgleich ein- oder ausschalten. Aus heißt: keine Angaben zum Kopie-Speicher.
+  // Turns the copy check on or off. Off means: no copy storage at all.
   const chooseCopyCheck = (on: boolean): void => {
     if (!editing) return;
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { copy_storage, copy_path, skip_copy_check, ...rest } = editing;
-    // Ohne Kopie-Abgleich läuft eine Drucker-Regel nie automatisch.
+    // Without the copy check, a printer rule never runs on its own.
     editing = on
       ? { ...rest, copy_storage: copy_storage || defaultCopyStorage(), copy_path: copy_path ?? '' }
       : { ...rest, skip_copy_check: true, enabled: false };
@@ -250,8 +302,8 @@
       index >= 0 && current
         ? { target: 'storage', ...current.rules[index]! }
         : {
-            id: `regel-${Date.now().toString(36)}`,
-            name: 'Neue Regel',
+            id: `rule-${Date.now().toString(36)}`,
+            name: t('rule.newName'),
             enabled: false,
             target: 'storage',
             storage: storages[0] ?? 'local',
@@ -263,9 +315,9 @@
           };
   };
 
-  // Beim Wechsel auf den Drucker-Speicher die Vorgaben, die eine Drucker-Regel
-  // braucht: nur Druckdateien, einzeln, nur von Hand, nur mit Kopie auf dem
-  // Server. Vorgabe: die neuesten 10 behalten, ohne Altersgrenze.
+  // Switching to a printer's storage sets what a printer rule needs: print
+  // files only, one by one, by hand, only with a copy on the server. Default:
+  // keep the newest 10, no age limit.
   const chooseTarget = (target: 'storage' | 'printer'): void => {
     if (!editing) return;
     picker = undefined;
@@ -296,15 +348,23 @@
           };
   };
 
+  // Saves the list made on the version the overview gave. When somebody else
+  // saved in between, the server refuses, and the page loads the new list.
   const saveRules = async (rules: Rule[]): Promise<boolean> => {
     try {
-      await writeRules(host, rules);
+      await writeRules(host, rules, current?.rules_version ?? '');
       await load();
       await scan();
 
       return true;
     } catch (error) {
-      problem = `Nicht gespeichert: ${String(error)}`;
+      if (error instanceof CallError && error.status === 412) {
+        problem = t('error.stale');
+        await load();
+        await scan();
+      } else {
+        problem = t('error.save', { detail: String(error) });
+      }
 
       return false;
     }
@@ -318,8 +378,10 @@
       keep_newest: Number(editing.keep_newest ?? 0),
       depth: editing.mode === 'folders' ? Number(editing.depth ?? 1) : 0,
     };
-    // saved_by setzt der Server, nie die Seite.
+    // The server sets saved_by, never the page. A folder rule judges whole
+    // folders and takes no pattern.
     delete rule.saved_by;
+    if (rule.target !== 'printer' && rule.mode === 'folders') delete rule.pattern;
     if (!rule.skip_copy_check) delete rule.skip_copy_check;
     const rules = [...current.rules];
     if (editingIndex >= 0) rules[editingIndex] = rule;
@@ -343,31 +405,60 @@
   };
 
   const describeKeep = (rule: Rule): string => {
-    let text =
-      rule.keep_days === 0
-        ? `alles außer den neuesten ${rule.keep_newest ?? 0}`
-        : `älter als ${rule.keep_days} Tage`;
-    if (rule.keep_days !== 0 && rule.keep_newest) text += `, die neuesten ${rule.keep_newest} bleiben immer`;
-    if (rule.target === 'printer') {
-      text += rule.skip_copy_check
-        ? ', ohne Kopie-Abgleich'
-        : `, nur mit Kopie in ${rule.copy_storage ?? '?'}:${rule.copy_path || '(ganzer Speicher)'}`;
-    }
+    const days = Number(rule.keep_days);
+    const newest = rule.keep_newest ?? 0;
+    if (days === 0) return t('rule.keep.newestOnly', { count: newest });
 
-    return text;
+    return newest ? t('rule.keep.olderNewest', { days, count: newest }) : t('rule.keep.older', { days });
   };
 
-  const describeWhat = (rule: Rule): string =>
+  const describeCopy = (rule: Rule): string =>
+    rule.skip_copy_check
+      ? t('rule.copy.skip')
+      : t('rule.copy.check', {
+          storage: rule.copy_storage ?? '?',
+          path: rule.copy_path || t('rule.copy.wholeStorage'),
+        });
+
+  const describeDelete = (rule: Rule): string =>
     rule.target === 'printer'
-      ? `Druckdateien in ${rule.path} (${rule.pattern ?? ''}), ohne Unterordner`
-      : rule.mode === 'folders'
-        ? `Ordner auf Ebene ${rule.depth ?? 1} unter ${rule.path} als Ganzes`
-        : `Dateien unter ${rule.path}${rule.pattern ? ` (${rule.pattern})` : ''}`;
+      ? t('rule.deleteCopy', { keep: describeKeep(rule), copy: describeCopy(rule) })
+      : t('rule.delete', { keep: describeKeep(rule) });
+
+  const describeWhat = (rule: Rule): string => {
+    if (rule.target === 'printer') return t('rule.what.printer', { path: rule.path, pattern: rule.pattern ?? '' });
+    if (rule.mode === 'folders') return t('rule.what.folders', { path: rule.path, depth: rule.depth ?? 1 });
+
+    return rule.pattern
+      ? t('rule.what.filesPattern', { path: rule.path, pattern: rule.pattern })
+      : t('rule.what.files', { path: rule.path });
+  };
 
   const describeWhere = (rule: Rule): string =>
-    rule.target === 'printer' ? `Drucker ${printerName(rule.device)}` : (rule.storage ?? '');
+    rule.target === 'printer' ? t('rule.where.printer', { name: printerName(rule.device) }) : (rule.storage ?? '');
 
-  const unitWord = (rule: Rule): string => (rule.mode === 'folders' ? 'Ordner' : 'Dateien');
+  const confirmText = (rule: Rule, plan: RulePlan | undefined): string => {
+    const units = plan ? unitsOf(rule, plan.delete_units) : t('units.matching');
+    const place = `${describeWhere(rule)}:${rule.path}`;
+    const keep = describeKeep(rule);
+    const main = plan
+      ? t('rule.cleanTextSize', { units, place, keep, size: bytes(plan.delete_size) })
+      : t('rule.cleanText', { units, place, keep });
+    if (rule.target !== 'printer') return main;
+
+    return `${main} ${t(rule.skip_copy_check ? 'rule.cleanPrinter' : 'rule.cleanPrinterCopies')}`;
+  };
+
+  const describeBy = (by: string): string => {
+    if (by === 'schedule') return t('history.by.schedule');
+    if (by === 'request') return t('history.by.request');
+    if (by.startsWith('hand:')) return t('history.by.hand', { person: by.slice('hand:'.length) });
+    // By hand, by someone the reader may not learn about.
+    if (by === 'hand') return t('history.by.handHidden');
+
+    // A run written by a version before 0.5.0.
+    return by;
+  };
 
   const field =
     'h-8 rounded-sm border border-border bg-background px-2 text-sm text-foreground';
@@ -378,19 +469,15 @@
 
 <section class="flex flex-col gap-4">
   <header class="flex flex-wrap items-center justify-between gap-3">
-    <h1 class="text-lg font-semibold">Aufräumen</h1>
+    <h1 class="text-lg font-semibold">{t('page.title')}</h1>
     <div class="flex items-center gap-2">
       <Button variant="secondary" size="sm" disabled={scanning} onclick={() => void scan()}>
-        {scanning ? 'Durchsuche …' : 'Neu durchsuchen'}
+        {scanning ? t('page.scanning') : t('page.rescan')}
       </Button>
     </div>
   </header>
 
-  <p class="text-sm text-muted-foreground">
-    Kamera-Snapshots, Zeitraffer und Bilder anderer Erweiterungen sammeln sich im Speicher des
-    Servers. Jede Regel sagt, was in einem Ordner wie lange bleibt. Gelöscht wird erst, wenn du es
-    auslöst, oder automatisch, wenn ein API-Token hinterlegt ist.
-  </p>
+  <p class="text-sm text-muted-foreground">{t('page.intro')}</p>
 
   {#if problem}<p aria-live="polite" class="text-sm text-destructive-text">{problem}</p>{/if}
   {#if notice}<p aria-live="polite" class="text-sm">{notice}</p>{/if}
@@ -398,136 +485,186 @@
 
   <Card>
     <CardHeader>
-      <CardTitle>Regeln</CardTitle>
+      <CardTitle>{t('due.title')}</CardTitle>
+    </CardHeader>
+    <CardContent>
+      {#if !current || (scanning && Object.keys(plans).length === 0)}
+        <p class="text-sm text-muted-foreground">{t('page.scanning')}</p>
+      {:else if dueRules.length === 0}
+        <p class="text-sm text-muted-foreground">{t('due.none')}</p>
+      {:else}
+        <p class="text-sm">{t('due.summary', { count: dueRules.length, size: bytes(dueSize) })}</p>
+        <ul class="mt-1 text-sm text-muted-foreground">
+          {#each dueRules as rule (rule.id)}
+            {@const plan = plans[rule.id]}
+            <li>
+              {t('due.item', {
+                rule: rule.name,
+                units: unitsOf(rule, plan?.delete_units ?? 0),
+                size: bytes(plan?.delete_size ?? 0),
+              })}
+            </li>
+          {/each}
+        </ul>
+        <div class="mt-2">
+          <ConfirmDialog
+            title={t('due.confirmTitle')}
+            description={t('due.confirmText', { count: dueRules.length, size: bytes(dueSize) })}
+            confirmLabel={t('rule.confirmDelete')}
+            variant="destructive"
+            onConfirm={() => void runDue()}
+          >
+            {#snippet trigger({ props })}
+              <Button
+                {...props}
+                variant="destructive"
+                size="sm"
+                disabled={busyRule !== '' || scanning}
+                pending={busyRule === 'due'}
+              >
+                {t('due.run')}
+              </Button>
+            {/snippet}
+          </ConfirmDialog>
+        </div>
+      {/if}
+      <p class="mt-3 text-xs text-muted-foreground">{t('due.later')}</p>
+    </CardContent>
+  </Card>
+
+  <Card>
+    <CardHeader>
+      <CardTitle>{t('rules.title')}</CardTitle>
     </CardHeader>
     <CardContent>
       {#if !current}
-        <p class="text-sm text-muted-foreground">Lade …</p>
+        <p class="text-sm text-muted-foreground">{t('page.loading')}</p>
       {:else}
         <ul class="flex flex-col gap-3">
           {#each current.rules as rule, index (rule.id)}
             {@const plan = plans[rule.id]}
-            <li class="flex flex-col gap-2 border-b border-border pb-3">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="font-medium">{rule.name}</span>
-                {#if rule.target === 'printer' && !rule.enabled}
-                  <Badge variant="secondary">nur von Hand</Badge>
-                {:else if rule.target === 'printer'}
-                  <Badge variant="success">aktiv</Badge>
-                  {#if current.printer_auto_dry_run}<Badge variant="warning">Probelauf</Badge>{/if}
-                {:else}
-                  <Badge variant={rule.enabled ? 'success' : 'secondary'}>
-                    {rule.enabled ? 'aktiv' : 'aus'}
-                  </Badge>
-                {/if}
-                <span class="text-xs text-muted-foreground">{describeWhere(rule)}: {describeWhat(rule)}</span>
-              </div>
-              <p class="text-sm text-muted-foreground">Löschen: {describeKeep(rule)}</p>
-              {#if rule.target === 'printer' && rule.enabled && !current.printer_auto}
-                <p class="text-sm text-warning-text">
-                  Aktiv, aber printer_auto ist in den Einstellungen aus. Läuft nur von Hand.
-                </p>
-              {/if}
-              {#if current.automatic && rule.enabled && rule.target !== 'printer' && !rule.saved_by}
-                <p class="text-sm text-muted-foreground">
-                  Läuft erst automatisch, wenn jemand mit Löschrecht die Regel einmal speichert.
-                </p>
-              {/if}
-              {#if current.skipped?.[rule.id]}
-                <p class="text-sm text-warning-text">Beim letzten automatischen Lauf ausgelassen: {current.skipped[rule.id]}</p>
-              {/if}
-
-              {#if plan?.error}
-                <p class="text-sm text-destructive-text">{plan.error}</p>
-              {:else if plan?.lazy}
-                <p class="text-sm text-muted-foreground">
-                  Noch nicht gelesen. Den Drucker zu lesen dauert etwas und geht nicht während eines Drucks.
-                </p>
-              {:else if plan}
-                <p class="text-sm">
-                  {plan.units}
-                  {unitWord(rule)}, {bytes(plan.size)}
-                  {#if plan.oldest && when(plan.oldest)}· ältestes vom {when(plan.oldest)}{/if}
-                  · <strong>
-                    {plan.delete_units} zu löschen ({bytes(plan.delete_size)})
-                  </strong>
-                  {#if plan.truncated}· nur ein Teil durchsucht{/if}
-                </p>
-                {#if rule.target === 'printer'}
-                  <ul class="text-sm text-muted-foreground">
-                    <li>Behalten, die neuesten: {Math.min(rule.keep_newest ?? 0, plan.units)}</li>
-                    {#if plan.copy_check}
-                      <li>
-                        Behalten, keine Kopie in Connect Local: {plan.kept_no_copy ?? 0}
-                        {#if plan.kept_no_copy}({bytes(plan.kept_no_copy_size ?? 0)}){/if}
-                      </li>
-                    {/if}
-                    <li>Löschen: {plan.delete_units}</li>
-                  </ul>
-                  {#if plan.kept_no_copy_list?.length}
-                    <details class="text-sm">
-                      <summary class="cursor-pointer text-muted-foreground">Ohne Kopie, bleiben liegen</summary>
-                      <ul class="mt-1 max-h-48 overflow-auto">
-                        {#each plan.kept_no_copy_list as name (name)}<li>{name}</li>{/each}
-                      </ul>
-                    </details>
+            {#if rule.hidden}
+              <li class="flex flex-col gap-1 border-b border-border pb-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium">{rule.name}</span>
+                  <Badge variant="secondary">{t('rule.badge.noAccess')}</Badge>
+                </div>
+                <p class="text-sm text-muted-foreground">{t('rule.hiddenText')}</p>
+              </li>
+            {:else}
+              <li class="flex flex-col gap-2 border-b border-border pb-3">
+                <div class="flex flex-wrap items-center gap-2">
+                  <span class="font-medium">{rule.name}</span>
+                  {#if rule.target === 'printer' && !rule.enabled}
+                    <Badge variant="secondary">{t('rule.badge.manualOnly')}</Badge>
+                  {:else if rule.target === 'printer'}
+                    <Badge variant="success">{t('rule.badge.active')}</Badge>
+                    {#if current.printer_auto_dry_run}<Badge variant="warning">{t('rule.badge.dryRun')}</Badge>{/if}
+                  {:else}
+                    <Badge variant={rule.enabled ? 'success' : 'secondary'}>
+                      {rule.enabled ? t('rule.badge.active') : t('rule.badge.off')}
+                    </Badge>
                   {/if}
+                  <span class="text-xs text-muted-foreground">
+                    {t('rule.place', { where: describeWhere(rule), what: describeWhat(rule) })}
+                  </span>
+                </div>
+                <p class="text-sm text-muted-foreground">{describeDelete(rule)}</p>
+                {#if rule.target === 'printer' && rule.enabled && !current.printer_auto}
+                  <p class="text-sm text-warning-text">{t('rule.printerAutoOff')}</p>
                 {/if}
-              {:else if scanning}
-                <p class="text-sm text-muted-foreground">Durchsuche …</p>
-              {/if}
+                {#if current.skipped?.[rule.id]}
+                  <p class="text-sm text-warning-text">{t('rule.skipped', { reason: current.skipped[rule.id] ?? '' })}</p>
+                {/if}
 
-              <div class="flex flex-wrap gap-2">
-                {#if rule.target === 'printer'}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    disabled={reading !== '' || busyRule !== ''}
-                    pending={reading === rule.id}
-                    onclick={() => void readPrinter(rule)}
-                  >
-                    Drucker lesen
-                  </Button>
+                {#if plan?.error}
+                  <p class="text-sm text-destructive-text">{plan.error}</p>
+                {:else if plan?.lazy}
+                  <p class="text-sm text-muted-foreground">{t('plan.notRead')}</p>
+                {:else if plan}
+                  <p class="text-sm">
+                    {t('plan.size', { units: unitsOf(rule, plan.units), size: bytes(plan.size) })}
+                    {#if plan.oldest && when(plan.oldest)}· {t('plan.oldest', { date: when(plan.oldest) })}{/if}
+                    · <strong>{t('plan.toDelete', { count: plan.delete_units, size: bytes(plan.delete_size) })}</strong>
+                    {#if plan.truncated}· {t('plan.truncated')}{/if}
+                  </p>
+                  {#if rule.target === 'printer'}
+                    <ul class="text-sm text-muted-foreground">
+                      <li>{t('plan.keptNewest', { count: Math.min(rule.keep_newest ?? 0, plan.units) })}</li>
+                      {#if plan.copy_check}
+                        <li>
+                          {plan.kept_no_copy
+                            ? t('plan.keptNoCopySize', { count: plan.kept_no_copy, size: bytes(plan.kept_no_copy_size ?? 0) })
+                            : t('plan.keptNoCopy', { count: 0 })}
+                        </li>
+                      {/if}
+                      <li>{t('plan.deleteCount', { count: plan.delete_units })}</li>
+                    </ul>
+                    {#if plan.kept_no_copy_list?.length}
+                      <details class="text-sm">
+                        <summary class="cursor-pointer text-muted-foreground">{t('plan.noCopyList')}</summary>
+                        <ul class="mt-1 max-h-48 overflow-auto">
+                          {#each plan.kept_no_copy_list as name (name)}<li>{name}</li>{/each}
+                        </ul>
+                      </details>
+                    {/if}
+                  {/if}
+                {:else if scanning}
+                  <p class="text-sm text-muted-foreground">{t('page.scanning')}</p>
                 {/if}
-                <ConfirmDialog
-                  title={`${rule.name} aufräumen?`}
-                  description={`${plan?.delete_units ?? 'Alle'} ${unitWord(rule)} ${describeKeep(rule)} unter ${describeWhere(rule)}:${rule.path} werden endgültig gelöscht${plan ? ` (${bytes(plan.delete_size)})` : ''}.${rule.target === 'printer' ? ` Vorher wird der Drucker noch einmal gelesen${rule.skip_copy_check ? '' : ' und jede Datei mit den Kopien auf dem Server abgeglichen'}.` : ''}`}
-                  confirmLabel="Löschen"
-                  variant="destructive"
-                  onConfirm={() => void clean(rule)}
-                >
-                  {#snippet trigger({ props })}
+
+                <div class="flex flex-wrap gap-2">
+                  {#if rule.target === 'printer'}
                     <Button
-                      {...props}
-                      variant="destructive"
+                      variant="secondary"
                       size="sm"
-                      disabled={busyRule !== '' ||
-                        (plan !== undefined && (plan.lazy || Boolean(plan.error) || plan.delete_units === 0))}
-                      pending={busyRule === rule.id}
+                      disabled={reading !== '' || busyRule !== ''}
+                      pending={reading === rule.id}
+                      onclick={() => void readPrinter(rule)}
                     >
-                      Jetzt aufräumen
+                      {t('rule.readPrinter')}
                     </Button>
-                  {/snippet}
-                </ConfirmDialog>
-                {#if rule.target !== 'printer' || rule.enabled || (current.printer_auto && !rule.skip_copy_check)}
-                  <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
-                    {rule.enabled ? 'Ausschalten' : 'Einschalten'}
-                  </Button>
-                {/if}
-                <Button variant="ghost" size="sm" onclick={() => startEdit(index)}>Bearbeiten</Button>
-                <ConfirmDialog
-                  title="Regel entfernen?"
-                  description={`Die Regel „${rule.name}“ wird entfernt. Dateien werden dabei nicht gelöscht.`}
-                  confirmLabel="Entfernen"
-                  variant="destructive"
-                  onConfirm={() => void removeRule(index)}
-                >
-                  {#snippet trigger({ props })}
-                    <Button {...props} variant="ghost" size="sm">Entfernen</Button>
-                  {/snippet}
-                </ConfirmDialog>
-              </div>
-            </li>
+                  {/if}
+                  <ConfirmDialog
+                    title={t('rule.cleanTitle', { rule: rule.name })}
+                    description={confirmText(rule, plan)}
+                    confirmLabel={t('rule.confirmDelete')}
+                    variant="destructive"
+                    onConfirm={() => void clean(rule)}
+                  >
+                    {#snippet trigger({ props })}
+                      <Button
+                        {...props}
+                        variant="destructive"
+                        size="sm"
+                        disabled={busyRule !== '' ||
+                          (plan !== undefined && (plan.lazy || Boolean(plan.error) || plan.delete_units === 0))}
+                        pending={busyRule === rule.id}
+                      >
+                        {t('rule.cleanNow')}
+                      </Button>
+                    {/snippet}
+                  </ConfirmDialog>
+                  {#if rule.target !== 'printer' || rule.enabled || (current.printer_auto && !rule.skip_copy_check)}
+                    <Button variant="secondary" size="sm" onclick={() => void toggle(index)}>
+                      {rule.enabled ? t('rule.turnOff') : t('rule.turnOn')}
+                    </Button>
+                  {/if}
+                  <Button variant="ghost" size="sm" onclick={() => startEdit(index)}>{t('rule.edit')}</Button>
+                  <ConfirmDialog
+                    title={t('rule.removeTitle')}
+                    description={t('rule.removeText', { rule: rule.name })}
+                    confirmLabel={t('rule.remove')}
+                    variant="destructive"
+                    onConfirm={() => void removeRule(index)}
+                  >
+                    {#snippet trigger({ props })}
+                      <Button {...props} variant="ghost" size="sm">{t('rule.remove')}</Button>
+                    {/snippet}
+                  </ConfirmDialog>
+                </div>
+              </li>
+            {/if}
           {/each}
         </ul>
 
@@ -540,25 +677,25 @@
             }}
           >
             <label class="flex flex-col gap-1 text-sm">
-              Name
+              {t('form.name')}
               <input class={field} bind:value={editing.name} required maxlength="80" />
             </label>
             {#if printers.length > 0 || editing.target === 'printer'}
               <label class="flex flex-col gap-1 text-sm">
-                Wo
+                {t('form.where')}
                 <select
                   class={field}
                   value={editing.target ?? 'storage'}
                   onchange={(event) => chooseTarget(event.currentTarget.value as 'storage' | 'printer')}
                 >
-                  <option value="storage">Speicher des Servers</option>
-                  <option value="printer">Speicher eines Druckers (USB)</option>
+                  <option value="storage">{t('form.where.storage')}</option>
+                  <option value="printer">{t('form.where.printer')}</option>
                 </select>
               </label>
             {/if}
             {#if editing.target === 'printer'}
               <label class="flex flex-col gap-1 text-sm">
-                Drucker
+                {t('form.printer')}
                 <select class={field} bind:value={editing.device} required>
                   {#each printers.length ? printers : [{ id: editing.device ?? '', name: editing.device ?? '' }] as printer (printer.id)}
                     <option value={printer.id}>{printer.name}</option>
@@ -566,11 +703,11 @@
                 </select>
               </label>
               <label class="flex flex-col gap-1 text-sm">
-                Ordner auf dem Drucker (ohne Unterordner)
+                {t('form.printerFolder')}
                 <input class={field} bind:value={editing.path} required placeholder="usb" />
               </label>
               <label class="flex flex-col gap-1 text-sm">
-                Nur Druckdateien wie
+                {t('form.printerPattern')}
                 <input class={field} bind:value={editing.pattern} required placeholder="*.bgcode" />
               </label>
               <label class="flex items-center gap-2 text-sm @md:col-span-2">
@@ -579,11 +716,11 @@
                   checked={!editing.skip_copy_check}
                   onchange={(event) => chooseCopyCheck(event.currentTarget.checked)}
                 />
-                Nur löschen, was mit gleichem Namen und gleicher Größe auch in Connect Local liegt (empfohlen)
+                {t('form.copyCheck')}
               </label>
               {#if !editing.skip_copy_check}
                 <label class="flex flex-col gap-1 text-sm">
-                  Kopien liegen im Speicher
+                  {t('form.copyStorage')}
                   <select
                     class={field}
                     bind:value={editing.copy_storage}
@@ -599,16 +736,16 @@
                   </select>
                 </label>
                 <div class="flex flex-col gap-1 text-sm">
-                  <span>Ordner mit den Kopien (mit Unterordnern)</span>
+                  <span>{t('form.copyFolder')}</span>
                   <div class="flex flex-wrap items-center gap-2">
-                    <code class="rounded-sm bg-muted px-2 py-1">{editing.copy_path || '(ganzer Speicher)'}</code>
+                    <code class="rounded-sm bg-muted px-2 py-1">{editing.copy_path || t('rule.copy.wholeStorage')}</code>
                     <Button
                       variant="secondary"
                       size="sm"
                       pending={pickerBusy}
                       onclick={() => void openFolder(editing?.copy_path ?? '')}
                     >
-                      Ordner wählen
+                      {t('form.pickFolder')}
                     </Button>
                   </div>
                 </div>
@@ -617,16 +754,16 @@
                     <div class="flex flex-wrap items-center gap-2">
                       <span class="text-muted-foreground">{picker.storage}:</span>
                       <code>{picker.path || '/'}</code>
-                      <Button size="sm" onclick={() => takeFolder(picker?.path ?? '')}>Diesen Ordner nehmen</Button>
+                      <Button size="sm" onclick={() => takeFolder(picker?.path ?? '')}>{t('picker.take')}</Button>
                       {#if picker.path}
                         <Button variant="ghost" size="sm" onclick={() => void openFolder(parentOf(picker?.path ?? ''))}>
-                          Eine Ebene hoch
+                          {t('picker.up')}
                         </Button>
                       {/if}
-                      <Button variant="ghost" size="sm" onclick={() => (picker = undefined)}>Schließen</Button>
+                      <Button variant="ghost" size="sm" onclick={() => (picker = undefined)}>{t('picker.close')}</Button>
                     </div>
                     {#if picker.folders.length === 0}
-                      <p class="text-muted-foreground">Keine Unterordner.</p>
+                      <p class="text-muted-foreground">{t('picker.empty')}</p>
                     {:else}
                       <ul class="max-h-48 overflow-auto">
                         {#each picker.folders as folder (folder)}
@@ -638,27 +775,25 @@
                         {/each}
                       </ul>
                     {/if}
-                    {#if picker.truncated}<p class="text-muted-foreground">Nur die ersten 500 Ordner.</p>{/if}
+                    {#if picker.truncated}<p class="text-muted-foreground">{t('picker.truncated')}</p>{/if}
                   </div>
                 {/if}
               {/if}
               {#if current.printer_auto}
                 <label class="flex items-center gap-2 text-sm @md:col-span-2">
                   <input type="checkbox" bind:checked={editing.enabled} disabled={Boolean(editing.skip_copy_check)} />
-                  aktiv (automatisch alle {current.interval || '…'}, höchstens {current.printer_auto_max} Dateien je
-                  Lauf{current.printer_auto_dry_run ? ', zurzeit nur Probelauf' : ''})
+                  {t(current.printer_auto_dry_run ? 'form.printerActiveDry' : 'form.printerActive', {
+                    interval: current.interval || '…',
+                    max: current.printer_auto_max,
+                  })}
                 </label>
               {/if}
               <p class="text-sm text-muted-foreground @md:col-span-2">
-                Nie während eines Drucks, nie die Datei des laufenden oder letzten Drucks und nie Dateien
-                ohne Datum. Dateien ohne Kopie zählen zu den neuesten, werden aber nie gelöscht. Von Hand
-                wird mit deinen Rechten am Drucker gelöscht{current.printer_auto
-                  ? ', automatisch als Erweiterung, solange du den Drucker selbst bedienen darfst'
-                  : ''}.
+                {t(current.printer_auto ? 'form.printerNoteAuto' : 'form.printerNote')}
               </p>
             {:else}
               <label class="flex flex-col gap-1 text-sm">
-                Speicher
+                {t('form.storage')}
                 <select class={field} bind:value={editing.storage}>
                   {#each storages.length ? storages : [editing.storage ?? ''] as name (name)}
                     <option value={name}>{name}</option>
@@ -666,32 +801,32 @@
                 </select>
               </label>
               <label class="flex flex-col gap-1 text-sm">
-                Ordner (nie die oberste Ebene)
-                <input class={field} bind:value={editing.path} required placeholder="z. B. camera" />
+                {t('form.folder')}
+                <input class={field} bind:value={editing.path} required placeholder={t('form.folderPlaceholder')} />
               </label>
               <label class="flex flex-col gap-1 text-sm">
-                Was wird beurteilt
+                {t('form.mode')}
                 <select class={field} bind:value={editing.mode}>
-                  <option value="files">einzelne Dateien</option>
-                  <option value="folders">ganze Ordner (z. B. ein Zeitraffer)</option>
+                  <option value="files">{t('form.mode.files')}</option>
+                  <option value="folders">{t('form.mode.folders')}</option>
                 </select>
               </label>
             {/if}
             {#if editing.target === 'printer'}
-              <!-- Druckdateien werden immer einzeln beurteilt. -->
+              <!-- Print files are always judged one by one. -->
             {:else if editing.mode === 'files'}
               <label class="flex flex-col gap-1 text-sm">
-                Nur Dateien wie (leer = alle)
+                {t('form.pattern')}
                 <input class={field} bind:value={editing.pattern} placeholder="*.jpg" />
               </label>
             {:else}
               <label class="flex flex-col gap-1 text-sm">
-                Ordnerebene unter dem Ordner
+                {t('form.depth')}
                 <input class={field} type="number" min="1" max="5" bind:value={editing.depth} />
               </label>
             {/if}
             <label class="flex flex-col gap-1 text-sm">
-              {editing.target === 'printer' ? 'Behalten (Tage, 0 = nur nach Anzahl)' : 'Behalten (Tage)'}
+              {editing.target === 'printer' ? t('form.keepDaysPrinter') : t('form.keepDays')}
               <input
                 class={field}
                 type="number"
@@ -702,23 +837,23 @@
               />
             </label>
             <label class="flex flex-col gap-1 text-sm">
-              Die neuesten immer behalten (Anzahl)
+              {t('form.keepNewest')}
               <input class={field} type="number" min="0" bind:value={editing.keep_newest} />
             </label>
             {#if editing.target !== 'printer'}
               <label class="flex items-center gap-2 text-sm">
                 <input type="checkbox" bind:checked={editing.enabled} />
-                aktiv (für den automatischen Lauf)
+                {t('form.active')}
               </label>
             {/if}
             <div class="flex gap-2 @md:col-span-2">
-              <Button type="submit" size="sm">Speichern</Button>
-              <Button variant="ghost" size="sm" onclick={() => (editing = undefined)}>Abbrechen</Button>
+              <Button type="submit" size="sm">{t('form.save')}</Button>
+              <Button variant="ghost" size="sm" onclick={() => (editing = undefined)}>{t('form.cancel')}</Button>
             </div>
           </form>
         {:else}
           <div class="mt-3">
-            <Button variant="secondary" size="sm" onclick={() => startEdit(-1)}>Regel hinzufügen</Button>
+            <Button variant="secondary" size="sm" onclick={() => startEdit(-1)}>{t('rule.add')}</Button>
           </div>
         {/if}
       {/if}
@@ -727,20 +862,16 @@
 
   <Card>
     <CardHeader>
-      <CardTitle>Automatisch</CardTitle>
+      <CardTitle>{t('auto.title')}</CardTitle>
     </CardHeader>
     <CardContent>
-      {#if current?.automatic || current?.printer_automatic}
+      {#if current?.printer_automatic}
         <p class="text-sm">
-          Alle {current.interval} werden die aktiven Regeln ausgeführt, jede nur, solange die Person,
-          die sie gespeichert hat, dort selbst löschen darf.
-          {current.automatic
-            ? 'Server-Speicher: an.'
-            : 'Server-Speicher: aus, dafür fehlt das api_token.'}
-          {current.printer_automatic
-            ? `Drucker: an, höchstens ${current.printer_auto_max} Dateien je Regel und Lauf, nur mit Kopie in Connect Local${current.printer_auto_dry_run ? ', zurzeit nur als Probelauf (es wird nichts gelöscht, nur im Verlauf notiert)' : ''}.`
-            : 'Drucker: nur von Hand.'}
-          {#if when(current.next_run)}Nächster Lauf: {when(current.next_run)}.{/if}
+          {t(current.printer_auto_dry_run ? 'auto.onDry' : 'auto.on', {
+            interval: current.interval ?? '',
+            max: current.printer_auto_max,
+          })}
+          {#if when(current.next_run)}{t('auto.next', { date: when(current.next_run) })}{/if}
         </p>
         <div class="mt-2">
           <Button
@@ -748,22 +879,18 @@
             size="sm"
             disabled={busyRule !== ''}
             pending={busyRule === '*'}
-            onclick={() => void runAutomatic()}>Jetzt ausführen</Button
+            onclick={() => void runAutomatic()}>{t('auto.runNow')}</Button
           >
         </div>
       {:else}
-        <p class="text-sm text-muted-foreground">
-          Aus. Zum Einschalten unter Einstellungen → API-Zugangsdaten einen Zugang mit dem Umfang
-          „operate“ anlegen und ihn unter Einstellungen → Erweiterungen → Aufräumen als api_token
-          eintragen, dazu auto_interval (z. B. 6h). Bis dahin löscht nur der Knopf „Jetzt aufräumen“.
-        </p>
+        <p class="text-sm text-muted-foreground">{t('auto.off')}</p>
       {/if}
     </CardContent>
   </Card>
 
   <Card>
     <CardHeader>
-      <CardTitle>Speicherbelegung</CardTitle>
+      <CardTitle>{t('usage.title')}</CardTitle>
     </CardHeader>
     <CardContent>
       <div class="mb-3 flex flex-wrap items-center gap-2">
@@ -771,18 +898,18 @@
           class={field}
           bind:value={usageStorage}
           onchange={() => void loadUsage(false)}
-          aria-label="Speicher"
+          aria-label={t('usage.storage')}
         >
           {#each storages as name (name)}
             <option value={name}>{name}</option>
           {/each}
         </select>
         <Button variant="ghost" size="sm" disabled={usageBusy} onclick={() => void loadUsage(true)}>
-          {usageBusy ? 'Zähle …' : 'Neu zählen'}
+          {usageBusy ? t('usage.counting') : t('usage.recount')}
         </Button>
         {#if usage}
           <span class="text-sm text-muted-foreground">
-            {bytes(usage.size)} in {usage.files} Dateien · Stand {when(usage.scanned)}
+            {t('usage.summary', { size: bytes(usage.size), count: usage.files, date: when(usage.scanned) })}
           </span>
         {/if}
       </div>
@@ -792,7 +919,7 @@
             <li class="flex flex-col gap-1">
               <div class="flex justify-between gap-2 text-sm">
                 <span>{item.dir ? `${item.path}/` : item.path}</span>
-                <span class="text-muted-foreground">{bytes(item.size)} · {item.files} Dateien</span>
+                <span class="text-muted-foreground">{t('usage.item', { size: bytes(item.size), count: item.files })}</span>
               </div>
               <div class="h-1.5 w-full rounded-full bg-muted">
                 <div class="h-1.5 rounded-full bg-primary" style:width={share(item.size)}></div>
@@ -806,28 +933,30 @@
 
   <Card>
     <CardHeader>
-      <CardTitle>Verlauf</CardTitle>
+      <CardTitle>{t('history.title')}</CardTitle>
     </CardHeader>
     <CardContent>
       {#if !current || current.history.length === 0}
-        <p class="text-sm text-muted-foreground">Noch nichts gelöscht.</p>
+        <p class="text-sm text-muted-foreground">{t('history.empty')}</p>
       {:else}
         <ul class="flex flex-col gap-1">
           {#each current.history as run, i (i)}
             <li class="text-sm">
               <span class="text-muted-foreground">{when(run.at)}</span>
-              · {run.rule} ·
-              {run.dry_run
-                ? `${run.units} würden gelöscht · ${bytes(run.freed)} würden frei`
-                : `${run.units} gelöscht · ${bytes(run.freed)} frei`}
-              · {run.by}
-              {#if run.dry_run}<Badge variant="secondary">Probelauf</Badge>{/if}
-              {#if run.partial}<Badge variant="warning">unvollständig</Badge>{/if}
-              {#if run.error}<span class="text-destructive-text"> · {run.error}</span>{/if}
+              · {run.rule === '*' ? t('history.allRules') : run.rule} ·
+              {t(run.dry_run ? 'history.wouldDelete' : 'history.deleted', { count: run.units, size: bytes(run.freed) })}
+              · {describeBy(run.by)}
+              {#if run.dry_run}<Badge variant="secondary">{t('history.dryRun')}</Badge>{/if}
+              {#if run.partial}<Badge variant="warning">{t('history.partial')}</Badge>{/if}
+              {#if run.error}
+                <span class="text-destructive-text">
+                  · {run.error.startsWith('hidden:') ? t('history.hidden') : run.error}
+                </span>
+              {/if}
               {#if run.deleted?.length}
                 <details>
                   <summary class="cursor-pointer text-muted-foreground">
-                    {run.dry_run ? 'Wäre gelöscht worden' : 'Gelöscht'}: {run.deleted.length} Dateien
+                    {t(run.dry_run ? 'history.listWould' : 'history.listDeleted', { count: run.deleted.length })}
                   </summary>
                   <ul class="mt-1 max-h-48 overflow-auto">
                     {#each run.deleted as file, j (j)}<li>{file}</li>{/each}

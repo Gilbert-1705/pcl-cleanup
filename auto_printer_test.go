@@ -37,7 +37,12 @@ func autoPrinter(t *testing.T, change func(*Settings)) (*module, *fakePrinters, 
 		change(&settings)
 	}
 
-	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
+	// anna may also delete in the storages: saving only the printer rule
+	// removes the default rules.
+	access := &fakeAccess{allow: map[string]bool{
+		"user:anna operate device/dev-1": true, "user:anna write_storage resource_kind/storage": true,
+		"user:anna observe device/dev-1": true,
+	}}
 	m, h := newModule(t, checked(t, settings), access)
 
 	printers := usbPrinter()
@@ -63,7 +68,7 @@ func TestTheSettingsOfThePrinterRunDefaultToSafe(t *testing.T) {
 	}
 
 	s = checked(t, Settings{AutoInterval: "6h", PrinterAuto: true, PrinterAutoMax: ptr(10), PrinterAutoDryRun: ptr(false)})
-	if !s.printerAutomatic() || s.automatic() || !s.scheduled() || s.printerMax != 10 || s.dryRun {
+	if !s.printerAutomatic() || !s.scheduled() || s.printerMax != 10 || s.dryRun {
 		t.Fatalf("set: %+v", s)
 	}
 
@@ -92,7 +97,7 @@ func TestAnActivePrinterRuleNeedsPrinterAuto(t *testing.T) {
 func TestADryRunDeletesNothingAndWritesDownTheOldest(t *testing.T) {
 	m, printers, _ := autoPrinter(t, nil)
 
-	runs := m.runAll(context.Background(), "automatisch")
+	runs := m.runAll(context.Background(), bySchedule)
 	if len(runs) != 1 {
 		t.Fatalf("runs %+v", runs)
 	}
@@ -116,7 +121,7 @@ func TestARunDeletesTheOldestUpToTheLimitAsTheModuleItself(t *testing.T) {
 		s.PrinterAutoDryRun, s.PrinterAutoMax = ptr(false), ptr(5)
 	})
 
-	run := m.runAll(context.Background(), "automatisch")[0]
+	run := m.runAll(context.Background(), bySchedule)[0]
 	if run.Error != "" || run.DryRun || run.Units != 5 || run.Freed != 5000 || !run.Partial {
 		t.Fatalf("run %+v", run)
 	}
@@ -139,7 +144,7 @@ func TestARunStopsWhenAPrintStarts(t *testing.T) {
 	m, printers, _ := autoPrinter(t, func(s *Settings) { s.PrinterAutoDryRun = ptr(false) })
 	printers.printAfter = 2
 
-	run := m.runAll(context.Background(), "automatisch")[0]
+	run := m.runAll(context.Background(), bySchedule)[0]
 	if len(printers.deleted) != 2 || run.Units != 2 || !strings.Contains(run.Error, "printing") || !run.Partial {
 		t.Fatalf("run %+v, deleted %d", run, len(printers.deleted))
 	}
@@ -148,7 +153,7 @@ func TestARunStopsWhenAPrintStarts(t *testing.T) {
 	// skipped rather than filling the history.
 	printers.deleted, printers.read = nil, 0
 
-	if runs := m.runAll(context.Background(), "automatisch"); len(runs) != 0 || len(printers.deleted) != 0 || printers.read != 0 {
+	if runs := m.runAll(context.Background(), bySchedule); len(runs) != 0 || len(printers.deleted) != 0 || printers.read != 0 {
 		t.Fatalf("while printing: %+v", runs)
 	}
 
@@ -165,7 +170,7 @@ func TestARunStopsWhenThePrinterRefusesOrTheCopiesAreMissing(t *testing.T) {
 	m, printers, _ := autoPrinter(t, func(s *Settings) { s.PrinterAutoDryRun = ptr(false) })
 	printers.refuse = true
 
-	run := m.runAll(context.Background(), "automatisch")[0]
+	run := m.runAll(context.Background(), bySchedule)[0]
 	if run.Units != 0 || !strings.Contains(run.Error, "FILE_HELD") {
 		t.Fatalf("refused: %+v", run)
 	}
@@ -173,7 +178,7 @@ func TestARunStopsWhenThePrinterRefusesOrTheCopiesAreMissing(t *testing.T) {
 	printers.refuse = false
 	m.files = &fakeCopies{fail: errors.New("boom")}
 
-	runs := m.runAll(context.Background(), "automatisch")
+	runs := m.runAll(context.Background(), bySchedule)
 
 	m.mu.Lock()
 	why := m.skipped["usb"]
@@ -195,7 +200,7 @@ func TestARunSkipsARuleWhoseAuthorMayNoLongerOperate(t *testing.T) {
 		m, printers, access := autoPrinter(t, func(s *Settings) { s.PrinterAutoDryRun = ptr(false) })
 		change(m, access)
 
-		runs := m.runAll(context.Background(), "automatisch")
+		runs := m.runAll(context.Background(), bySchedule)
 
 		m.mu.Lock()
 		why := m.skipped["usb"]
@@ -207,7 +212,7 @@ func TestARunSkipsARuleWhoseAuthorMayNoLongerOperate(t *testing.T) {
 	}
 }
 
-func TestStorageRulesNeedTheTokenEvenWhenPrintersRun(t *testing.T) {
+func TestStorageRulesNeverRunOnTheSchedule(t *testing.T) {
 	m, _, access := autoPrinter(t, nil)
 	access.allow["user:anna write_storage resource_kind/storage"] = true
 
@@ -218,13 +223,26 @@ func TestStorageRulesNeedTheTokenEvenWhenPrintersRun(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m.runAll(context.Background(), "automatisch")
+	// An active storage rule with an author who may delete, and old files to
+	// delete: the schedule still leaves it alone, without a word, because the
+	// module protocol cannot delete in a storage.
+	for _, run := range m.runAll(context.Background(), bySchedule) {
+		if run.Rule == snap.Name {
+			t.Fatalf("the storage rule ran: %+v", run)
+		}
+	}
+
+	for _, run := range m.history.list() {
+		if run.Rule == snap.Name {
+			t.Fatalf("the storage rule is in the history: %+v", run)
+		}
+	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if !strings.Contains(m.skipped["s"], "api_token") {
-		t.Fatalf("skipped %+v", m.skipped)
+	if why, ok := m.skipped["s"]; ok {
+		t.Fatalf("the storage rule was reported as skipped: %q", why)
 	}
 }
 
@@ -239,7 +257,7 @@ func TestThePageSeesThePrinterRunSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !state.PrinterAuto || !state.PrinterAutomatic || state.PrinterAutoMax != 20 || !state.DryRun || state.Automatic {
+	if !state.PrinterAuto || !state.PrinterAutomatic || state.PrinterAutoMax != 20 || !state.DryRun {
 		t.Fatalf("state %+v", state)
 	}
 

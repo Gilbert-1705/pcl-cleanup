@@ -20,8 +20,9 @@ import (
 //  2. The author's own rights: saving a changed rule asks the server whether
 //     the person saving it may delete there (write_storage on storages,
 //     operate on the printer). The rule remembers that person, and an
-//     automatic run asks again for them before it deletes anything, because
-//     the API token it deletes with may hold more rights than they do.
+//     automatic printer run asks again for them before it deletes anything,
+//     because the module deletes there as itself, with the operator role the
+//     operator gave it, which may be more than that person may.
 //
 // A rule nobody has saved since 0.3.0 (the defaults, or rules from an older
 // version) has no author, so it never runs automatically until somebody saves
@@ -118,7 +119,8 @@ func mayDelete(ctx context.Context, access checker, person string, rule Rule) er
 // adopt merges the rules a person saves with the rules kept so far. A rule
 // that is unchanged keeps its author and is not checked again. A new or
 // changed rule has to pass the operator's lists and the person's rights, and
-// gets the person as its author.
+// gets the person as its author. A kept rule that is missing from the saved
+// list is removed only if the person may delete where it points.
 func adopt(ctx context.Context, access checker, settings Settings, person string, kept, saved []Rule) ([]Rule, error) {
 	before := map[string]Rule{}
 	for _, rule := range kept {
@@ -149,6 +151,23 @@ func adopt(ctx context.Context, access checker, settings Settings, person string
 
 		rule.SavedBy = person
 		out[i] = rule
+	}
+
+	// A rule that is left out is removed. That takes the same right as
+	// changing it, so nobody removes a rule they could not have saved.
+	still := map[string]bool{}
+	for _, rule := range out {
+		still[rule.ID] = true
+	}
+
+	for _, rule := range kept {
+		if still[rule.ID] {
+			continue
+		}
+
+		if err := mayDelete(ctx, access, person, rule); err != nil {
+			return nil, fmt.Errorf("removing %s: %w", rule.Name, err)
+		}
 	}
 
 	return out, nil

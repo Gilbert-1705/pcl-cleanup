@@ -1,19 +1,19 @@
 # Cleanup for Prusa Connect Local.
 #
 # One module with both halves: the Go process (main.go), which scans the
-# storages and applies the rules, and a page "Aufräumen" under Extensions in
-# the sidebar. The page and the settings are German; title, summary and the
-# egress entry are English for the Plugin Marketplace.
+# storages and plans the rules, and a page "Cleanup" under Extensions in the
+# sidebar. The page is English with a German translation (ui/src/locales);
+# the texts in this file are English.
 #
 # Install (see README.md):
-#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.4.1 -from <release> -approve
+#   prusa-connect module add github.com/gilbert-1705/pcl-cleanup@0.5.0 -from <release> -approve
 
 name: cleanup
 title: Cleanup
-summary: Deletes old camera snapshots, timelapses and images of other extensions by per-folder rules, and optionally old print files on a printer's USB drive. Shows first what would go and how storage is used.
+summary: Deletes old camera snapshots, timelapses and images of other extensions by per-folder rules, and optionally old print files on a printer's USB drive. Shows first what would go and how storage is used, then deletes with your own rights.
 codeowner: Gilbert-1705
 kind: sink
-version: 0.4.1
+version: 0.5.0
 license: MIT
 contract_major: 1
 openapi: openapi.json
@@ -35,83 +35,64 @@ require:
   # Only the optional automatic printer run (printer_auto) sends delete_file.
   core-device.command: "*"
 
-# read_storage: scan the storages for the automatic run. Deleting happens from
-# the page with the signed-in person's rights or, automatically, with the API
-# token. By hand, printers are read for the person on the page, with their
-# rights. The module holds no right on any printer unless the operator grants
-# its instance the operator role on one for the automatic printer run
-# (printer_auto, off by default); install does not write that grant.
+# read_storage: the module reads storages, for the person on the page with
+# their rights and as itself to find the copies for the automatic printer run.
+# It never deletes in a storage: the page does, with the signed-in person's
+# rights. The module protocol has no call to delete in a storage yet, so
+# storage rules do not run on their own (ROADMAP.md). By hand, printers are
+# read for the person on the page, with their rights. The module holds no
+# right on any printer unless the operator grants its instance the operator
+# role on one for the automatic printer run (printer_auto, off by default);
+# install does not write that grant.
 permissions:
   - read_storage
 
-# Asked, never taken: whether the person saving a rule may delete there
-# (write_storage on storages, operate on the printer), and again before every
-# automatic run for the person who saved the rule. See policy.go.
+# Asked, never taken: whether the person saving or removing a rule may delete
+# there (write_storage on storages, operate on the printer), and again before
+# every automatic printer run for the person who saved the rule (policy.go).
+# observe: the page shows what a printer rule did on a printer, and who saved
+# a rule, only to a person who may see that printer (visibility.go).
 checks:
   - write_storage
   - operate
-# The automatic run asks about the rule's author, who is usually not on the
-# page at that moment.
+  - observe
+# The automatic printer run asks about the rule's author, who is usually not on
+# the page at that moment.
 check_absent_people: true
 
 needs:
   # Rules (regeln.json) and history (verlauf.json).
   data: true
 
-# One connection, and it goes back to this server itself, not to a third party.
-# The module protocol can list storages but cannot delete, so the automatic
-# run for storage rules calls the server's own HTTP API
-# (POST /api/v1/storages/{storage}/deletions) with the API token the operator
-# created for it. core_url defaults to http://127.0.0.1:8080, the address and
-# port a Prusa Connect server listens on unless its config says otherwise
-# (core.api.addr). core_url has to name this machine: 127.0.0.1, ::1 or
-# localhost. The module refuses any other host when it is configured, its
-# client only dials loopback addresses, ignores proxy variables and does not
-# follow redirects (loopback.go). The port is the one core_url names, as a
-# server may listen on another port than 8080; 80 and 443 cover a local
-# reverse proxy. Without api_token and auto_interval the process makes no
-# connection at all. The automatic printer run (printer_auto) needs none: it
-# uses the module protocol (device.files, device.command delete_file).
-egress:
-  - option: core_url
-    ports: [8080, 80, 443]
-    from: process
-    why: "Automatic storage cleanup only: deletes through this server's own HTTP API, as the module protocol cannot delete. core_url must name this machine (127.0.0.1, ::1, localhost), on any port."
-    sends: "Paths of files to delete in this server's own storages and the API token (scope operate) from api_token, only to this machine: other hosts and redirects are refused."
+# No egress: the process makes no network connection. It talks to Prusa
+# Connect Local only through the module protocol on its standard input and
+# output.
 
 options:
-  - key: core_url
-    type: url
-    default: http://127.0.0.1:8080
-    summary: Adresse dieses Servers aus Sicht des Moduls, für den automatischen Lauf. Nur 127.0.0.1, ::1 oder localhost, beliebiger Port.
-  - key: api_token
-    type: secret
-    default: ""
-    summary: API-Zugang mit dem Umfang operate (Einstellungen → API-Zugangsdaten). Ohne ihn löscht nur der Knopf auf der Seite.
   - key: auto_interval
     type: duration
     default: "0s"
-    summary: Wie oft die aktiven Regeln automatisch laufen, z. B. 6h. 0s schaltet das aus. Speicher-Regeln brauchen dazu api_token, Drucker-Regeln printer_auto.
+    summary: How often the active printer rules run on their own, e.g. 6h; 0s turns it off. Needs printer_auto. Storage rules run from the page only.
   - key: allowed_storages
     type: list
     default: '["local"]'
-    summary: Die Speicher, auf die Regeln zeigen dürfen. "*" erlaubt alle. Was nicht in der Liste steht, wird weder gespeichert noch aufgeräumt.
+    summary: The storages rules may point at; "*" allows all. A rule outside the list is neither saved nor run.
   - key: allowed_devices
     type: list
     default: "[]"
-    summary: Die Drucker (IDs), auf deren eigenem Speicher Regeln Druckdateien löschen dürfen. "*" erlaubt alle, leer keinen.
+    summary: The printers (ids) on whose own storage rules may delete print files; "*" allows all, empty none.
   - key: printer_auto
     type: bool
     default: "false"
-    summary: Drucker-Regeln dürfen aktiv sein und laufen alle auto_interval, als Erweiterung selbst. Braucht zusätzlich je Drucker die Operator-Rolle für die Instanz (siehe README). Damit könnte die Erweiterung auch Drucke starten; sie sendet aber nur delete_file.
+    summary: Printer rules may be active and run every auto_interval, as the extension itself. Also needs the operator role for the extension's instance on each printer (see README). That role would also let it start prints; the extension only sends delete_file.
   - key: printer_auto_max
     type: int
     default: "50"
-    summary: Höchstens so viele Dateien löscht ein automatischer Lauf je Drucker-Regel, die ältesten zuerst. 1 bis 500.
+    summary: The most files one automatic run deletes per printer rule, the oldest first. 1 to 500.
   - key: printer_auto_dry_run
     type: bool
     default: "true"
-    summary: Probelauf. Der automatische Drucker-Lauf löscht nichts und schreibt nur in den Verlauf, was er löschen würde.
+    summary: Dry run. The automatic printer run deletes nothing and only writes to the history what it would delete.
 
 ui:
   entry: ui/index.js
@@ -119,5 +100,5 @@ ui:
   contributes:
     pages:
       - path: cleanup
-        title: Aufräumen
+        title: Cleanup
         icon: wrench

@@ -41,6 +41,9 @@ jobs:
           core_commit="$(sed -n 's/^CORE_COMMIT[[:space:]]*?=[[:space:]]*//p' Makefile)"
           test -n "$core_commit"
           git clone -q --depth 1 --branch "$core_commit" https://github.com/prusa3d/prusa-connect.git .core
+          # A tag can be moved: the checkout has to be the commit the Makefile names.
+          core_sha="$(sed -n 's/^CORE_SHA[[:space:]]*?=[[:space:]]*//p' Makefile)"
+          test "$(git -C .core rev-parse HEAD)" = "$core_sha"
 
       - name: Vet
         run: go vet ./...

@@ -3,20 +3,26 @@
 // extensions leave behind.
 //
 // Rules say which folder of which storage keeps how much. The page shows what
-// each rule would delete and deletes it with the signed-in person's rights.
-// With an API token set, the module also runs the rules on its own schedule,
-// for each rule only while the person who saved it may still delete there
-// (policy.go). Rules on a printer's own storage run by hand (printer.go), and
-// on the schedule only when the operator turns that on (auto_printer.go).
+// each rule would delete and which active rules are due, and deletes with the
+// signed-in person's rights. The module protocol cannot delete in a storage,
+// so storage rules never run on their own; see ROADMAP.md. Rules on a
+// printer's own storage run by hand (printer.go), and on the schedule only
+// when the operator turns that on (auto_printer.go), for each rule only while
+// the person who saved it may still delete there (policy.go).
 package main
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
 	"os/signal"
@@ -38,7 +44,7 @@ import (
 
 const (
 	name    = "cleanup"
-	release = extension.Version("0.4.1")
+	release = extension.Version("0.5.0")
 )
 
 //go:embed openapi.json
@@ -128,6 +134,10 @@ type module struct {
 	rules    rulesFile
 	history  *history
 
+	// saving keeps two saves of the rules from running into each other: each
+	// one loads, checks and writes the list as a whole.
+	saving sync.Mutex
+
 	mu      sync.Mutex
 	usage   map[string]Usage
 	nextRun time.Time
@@ -161,15 +171,15 @@ func (m *module) start(ctx context.Context, settings Settings, dir string) error
 			}()
 		}
 
-		if settings.interval > 0 && !settings.automatic() {
-			fmt.Fprintf(os.Stderr, "%s: auto_interval is set but api_token is not, so storage rules are not run on their own\n", name)
+		if settings.interval > 0 && !settings.PrinterAuto {
+			fmt.Fprintf(os.Stderr, "%s: auto_interval is set but printer_auto is off, so nothing runs on its own; storage rules run from the page\n", name)
 		}
 	})
 
 	return err
 }
 
-// schedule runs every enabled rule each auto_interval, starting a few
+// schedule runs every active printer rule each auto_interval, starting a few
 // minutes after the module starts, when the server has settled.
 func (m *module) schedule(ctx context.Context) {
 	next := time.Now().Add(5 * time.Minute)
@@ -185,7 +195,7 @@ func (m *module) schedule(ctx context.Context) {
 		case <-time.After(time.Until(next)):
 		}
 
-		m.runAll(ctx, "automatisch")
+		m.runAll(ctx, bySchedule)
 
 		next = time.Now().Add(m.settings.interval)
 	}
@@ -210,26 +220,20 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 
 	rules, err := m.rules.load()
 	if err != nil {
-		record := RunRecord{At: time.Now(), By: by, Rule: "alle", Error: err.Error()}
+		record := RunRecord{At: time.Now(), By: by, Rule: "*", Error: err.Error()}
 		m.history.add(record)
 
 		return []RunRecord{record}
 	}
-
-	d := deleter{base: m.settings.CoreURL, token: m.settings.APIToken, client: coreClient()}
 
 	var out []RunRecord
 
 	skipped := map[string]string{}
 
 	for _, rule := range rules {
-		if !rule.Enabled {
-			continue
-		}
-
-		if !rule.printer() && !m.settings.automatic() {
-			skipped[rule.ID] = "api_token is not set, so storage rules only run by hand"
-
+		// Storage rules run from the page only: the module protocol cannot
+		// delete in a storage (ROADMAP.md).
+		if !rule.Enabled || !rule.printer() {
 			continue
 		}
 
@@ -240,52 +244,21 @@ func (m *module) runAll(ctx context.Context, by string) []RunRecord {
 			continue
 		}
 
-		if rule.printer() {
-			record, skip := runPrinter(ctx, m.printers, m.files, rule, m.settings, by, time.Now())
-			if skip != nil {
-				skipped[rule.ID] = skip.Error()
-				fmt.Fprintf(os.Stderr, "%s: %s: skipped: %v\n", name, rule.Name, skip)
-
-				continue
-			}
-
-			if record.Units == 0 && record.Error == "" {
-				continue
-			}
-
-			m.history.add(record)
-			out = append(out, record)
-			fmt.Fprintf(os.Stderr, "%s: %s: %d files, %d bytes, dry run %v %s\n", name, rule.Name, record.Units, record.Freed, record.DryRun, record.Error)
+		record, skip := runPrinter(ctx, m.printers, m.files, rule, m.settings, by, time.Now())
+		if skip != nil {
+			skipped[rule.ID] = skip.Error()
+			fmt.Fprintf(os.Stderr, "%s: %s: skipped: %v\n", name, rule.Name, skip)
 
 			continue
 		}
 
-		plan := planRule(ctx, m.files, rule, "", time.Now())
-		record := RunRecord{At: time.Now(), By: by, Rule: rule.Name}
-
-		switch {
-		case plan.Error != "":
-			record.Error = plan.Error
-		case len(plan.Delete) == 0:
+		if record.Units == 0 && record.Error == "" {
 			continue
-		default:
-			done, err := d.remove(ctx, rule.Storage, plan.Delete)
-			record.Units = done
-			record.Partial = plan.Truncated || done < len(plan.Delete)
-
-			if plan.DeleteUnits > 0 {
-				record.Files = plan.DeleteFiles * done / plan.DeleteUnits
-				record.Freed = plan.DeleteSize * int64(done) / int64(plan.DeleteUnits)
-			}
-
-			if err != nil {
-				record.Error = err.Error()
-			}
 		}
 
 		m.history.add(record)
 		out = append(out, record)
-		fmt.Fprintf(os.Stderr, "%s: %s: %d deleted, %d bytes freed %s\n", name, rule.Name, record.Units, record.Freed, record.Error)
+		fmt.Fprintf(os.Stderr, "%s: %s: %d files, %d bytes, dry run %v %s\n", name, rule.Name, record.Units, record.Freed, record.DryRun, record.Error)
 	}
 
 	m.mu.Lock()
@@ -305,12 +278,14 @@ func (m *module) forgetUsage() {
 
 // State is what the page reads first.
 type State struct {
-	Rules     []Rule      `json:"rules"`
-	Automatic bool        `json:"automatic"`
-	Interval  string      `json:"interval"`
-	NextRun   time.Time   `json:"next_run,omitzero"`
-	Running   bool        `json:"running"`
-	History   []RunRecord `json:"history"`
+	Rules []Rule `json:"rules"`
+	// RulesVersion names the stored rules. PUT /rules has to send it back in
+	// If-Match, so a save made on an older list is refused.
+	RulesVersion string      `json:"rules_version"`
+	Interval     string      `json:"interval"`
+	NextRun      time.Time   `json:"next_run,omitzero"`
+	Running      bool        `json:"running"`
+	History      []RunRecord `json:"history"`
 	// Skipped is why the last automatic run left a rule out, by rule id.
 	Skipped map[string]string `json:"skipped,omitempty"`
 	// AllowedStorages and AllowedDevices are the operator's lists, so the page
@@ -331,7 +306,7 @@ func (m *module) routes() http.Handler {
 
 	// Not /state: the host keeps /api/v1/modules/<namespace>/state for the
 	// module's records and answers it itself.
-	mux.HandleFunc("GET /overview", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /overview", func(w http.ResponseWriter, r *http.Request) {
 		if m.history == nil {
 			answer(w, http.StatusServiceUnavailable, map[string]string{"error": "the module is still starting"})
 
@@ -340,14 +315,15 @@ func (m *module) routes() http.Handler {
 
 		rules, err := m.rules.load()
 		state := State{
-			Rules: rules, Automatic: m.settings.automatic(), History: m.history.list(),
-			AllowedStorages: m.settings.AllowedStorages, AllowedDevices: m.settings.AllowedDevices,
-			PrinterAuto: m.settings.PrinterAuto, PrinterAutomatic: m.settings.printerAutomatic(),
+			AllowedStorages: m.settings.AllowedStorages,
+			PrinterAuto:     m.settings.PrinterAuto, PrinterAutomatic: m.settings.printerAutomatic(),
 			PrinterAutoMax: m.settings.printerMax, DryRun: m.settings.dryRun,
 		}
 
 		if err != nil {
 			state.Error = err.Error()
+		} else {
+			state.RulesVersion = rulesVersion(rules)
 		}
 
 		if m.settings.interval > 0 {
@@ -356,18 +332,26 @@ func (m *module) routes() http.Handler {
 
 		m.mu.Lock()
 		state.NextRun, state.Running = m.nextRun, m.running
-		if len(m.skipped) > 0 {
-			state.Skipped = map[string]string{}
-			for id, why := range m.skipped {
-				state.Skipped[id] = why
-			}
+		skipped := map[string]string{}
+		for id, why := range m.skipped {
+			skipped[id] = why
 		}
 		m.mu.Unlock()
+
+		// Only what the person may see (visibility.go).
+		newViewer(r.Context(), m.access, routesapi.PrincipalOf(r)).
+			overview(&state, rules, m.history.list(), skipped, m.settings.AllowedDevices)
 
 		answer(w, http.StatusOK, state)
 	})
 
 	mux.HandleFunc("PUT /rules", func(w http.ResponseWriter, r *http.Request) {
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
+
+			return
+		}
+
 		raw, err := io.ReadAll(io.LimitReader(r.Body, 256<<10))
 		if err != nil {
 			refuse(w, http.StatusBadRequest, err)
@@ -382,16 +366,39 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
-		if err = checkRules(rules); err != nil {
-			refuse(w, http.StatusUnprocessableEntity, err)
-
-			return
-		}
+		// One save at a time, against the list it was made on.
+		m.saving.Lock()
+		defer m.saving.Unlock()
 
 		kept, err := m.rules.load()
 		if err != nil {
 			// A broken file is replaced, but every rule is then new and checked.
 			kept = nil
+		}
+
+		switch match := ifMatch(r); {
+		case match == "":
+			refuse(w, http.StatusPreconditionRequired, errors.New("send the rules_version of the overview in If-Match"))
+
+			return
+		case kept != nil && match != rulesVersion(kept):
+			refuse(w, http.StatusPreconditionFailed, errors.New("the rules changed since they were read; load them again"))
+
+			return
+		}
+
+		rules = keepHidden(rules, kept)
+
+		if err = refuseUnused(rules); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
+		}
+
+		if err = checkRules(rules); err != nil {
+			refuse(w, http.StatusUnprocessableEntity, err)
+
+			return
 		}
 
 		rules, err = adopt(r.Context(), m.access, m.settings, routesapi.PrincipalOf(r), kept, rules)
@@ -417,7 +424,14 @@ func (m *module) routes() http.Handler {
 			return
 		}
 
-		answer(w, http.StatusOK, rules)
+		view := newViewer(r.Context(), m.access, routesapi.PrincipalOf(r))
+		shown := make([]Rule, 0, len(rules))
+
+		for _, rule := range rules {
+			shown = append(shown, view.rule(rule))
+		}
+
+		answer(w, http.StatusOK, map[string]any{"rules": shown, "rules_version": rulesVersion(rules)})
 	})
 
 	mux.HandleFunc("GET /plan", func(w http.ResponseWriter, r *http.Request) {
@@ -430,10 +444,21 @@ func (m *module) routes() http.Handler {
 
 		only := r.URL.Query().Get("rule")
 		person := routesapi.PrincipalOf(r)
+		view := newViewer(r.Context(), m.access, person)
 		plans := []RulePlan{}
 
 		for _, rule := range rules {
 			if only != "" && rule.ID != only {
+				continue
+			}
+
+			// A printer the person may not see is not read for them, and its
+			// rule says nothing about it (visibility.go).
+			if rule.printer() && !view.observes(rule.Device) {
+				plans = append(plans, RulePlan{
+					RuleID: rule.ID, Name: rule.Name, Target: rule.Target, Delete: []string{}, Error: errHiddenText,
+				})
+
 				continue
 			}
 
@@ -522,6 +547,12 @@ func (m *module) routes() http.Handler {
 	// The page deletes with the person's own rights and reports what it did,
 	// so the history covers both kinds of run.
 	mux.HandleFunc("POST /runs", func(w http.ResponseWriter, r *http.Request) {
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
+
+			return
+		}
+
 		var record RunRecord
 		if err := json.NewDecoder(io.LimitReader(r.Body, 16<<10)).Decode(&record); err != nil {
 			refuse(w, http.StatusBadRequest, err)
@@ -542,7 +573,7 @@ func (m *module) routes() http.Handler {
 		}
 
 		record.At = time.Now()
-		record.By = "von Hand (" + routesapi.PrincipalOf(r) + ")"
+		record.By = byHand + routesapi.PrincipalOf(r)
 		m.history.add(record)
 		m.forgetUsage()
 
@@ -550,13 +581,19 @@ func (m *module) routes() http.Handler {
 	})
 
 	mux.HandleFunc("POST /auto/run", func(w http.ResponseWriter, r *http.Request) {
-		if !m.settings.scheduled() {
-			refuse(w, http.StatusConflict, fmt.Errorf("automatic cleanup needs auto_interval and api_token or printer_auto in the settings"))
+		if err := wantJSON(r); err != nil {
+			refuse(w, http.StatusUnsupportedMediaType, err)
 
 			return
 		}
 
-		answer(w, http.StatusOK, map[string]any{"runs": m.runAll(r.Context(), "von Hand angestoßen")})
+		if !m.settings.scheduled() {
+			refuse(w, http.StatusConflict, fmt.Errorf("the automatic printer run needs auto_interval and printer_auto in the settings"))
+
+			return
+		}
+
+		answer(w, http.StatusOK, map[string]any{"runs": m.runAll(r.Context(), byRequest)})
 	})
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -613,3 +650,52 @@ type stdio struct{}
 func (stdio) Read(p []byte) (int, error)  { return os.Stdin.Read(p) }
 func (stdio) Write(p []byte) (int, error) { return os.Stdout.Write(p) }
 func (stdio) Close() error                { return os.Stdin.Close() }
+
+// versionKey keys rulesVersion. It is new each time the process starts, so
+// nobody can check a guess of the rules against a version, not even of a
+// printer rule hidden from them. A version still changes whenever any rule
+// does. After a restart every version differs, the page's next save is
+// refused once with 412, and the page loads the list again.
+var versionKey = func() []byte {
+	key := make([]byte, 32)
+	_, _ = rand.Read(key) // crypto/rand.Read does not fail (Go 1.24).
+
+	return key
+}()
+
+// rulesVersion names a list of rules: the first 16 hex digits of an
+// HMAC-SHA256 of its JSON under versionKey. Two saves made on the same list
+// carry the same version, and the second one is refused (PUT /rules).
+func rulesVersion(rules []Rule) string {
+	raw, err := json.Marshal(rules)
+	if err != nil {
+		return ""
+	}
+
+	mac := hmac.New(sha256.New, versionKey)
+	mac.Write(raw)
+
+	return hex.EncodeToString(mac.Sum(nil)[:8])
+}
+
+// ifMatch is the version a request names in If-Match, without quotes and a
+// weak marker.
+func ifMatch(r *http.Request) string {
+	value := strings.TrimSpace(r.Header.Get("If-Match"))
+	value = strings.TrimPrefix(value, "W/")
+
+	return strings.Trim(value, `"`)
+}
+
+// wantJSON refuses a request that does not say it sends JSON. A browser sends
+// a form or text/plain to another site without asking first, but never
+// application/json, so this keeps such requests out of the routes that change
+// something.
+func wantJSON(r *http.Request) error {
+	media, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || media != "application/json" {
+		return errors.New("send the body as application/json")
+	}
+
+	return nil
+}

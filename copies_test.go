@@ -16,10 +16,13 @@ import (
 )
 
 // fakeCopies is a server storage with files of given sizes. It records who
-// it listed for, can fail, and can be endless to cut a scan.
+// it listed for, can fail, and can be endless to cut a scan. A file without
+// an entry in mtimes was written long ago (copyEpoch), before any print file
+// in the tests.
 type fakeCopies struct {
 	mu      sync.Mutex
 	sizes   map[string]int64
+	mtimes  map[string]int64
 	fail    error
 	endless bool
 	calls   int
@@ -65,7 +68,12 @@ func (f *fakeCopies) List(_ context.Context, p storageapi.ListParams) (storageap
 		if deeper {
 			children[head] = storageapi.ListEntry{Name: head, Dir: true}
 		} else {
-			children[head] = storageapi.ListEntry{Name: head, Size: size, MTime: now.Unix()}
+			mtime, ok := f.mtimes[file]
+			if !ok {
+				mtime = copyEpoch.Unix()
+			}
+
+			children[head] = storageapi.ListEntry{Name: head, Size: size, MTime: mtime}
 		}
 	}
 
@@ -87,6 +95,10 @@ func (f *fakeCopies) List(_ context.Context, p storageapi.ListParams) (storageap
 
 	return out, nil
 }
+
+// copyEpoch is when the copies in the tests were written unless said
+// otherwise: before every print file, as a real copy is.
+var copyEpoch = now.AddDate(-5, 0, 0)
 
 // copiesOf holds a copy of every print file on the printer under drucke/,
 // some in a subfolder, as Connect Local keeps them.
@@ -286,7 +298,7 @@ func TestKeepDaysZeroIsOnlyForPrintersThatKeepTheNewest(t *testing.T) {
 }
 
 func TestThePrinterRuleNeedsAnAllowedCopyStorage(t *testing.T) {
-	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
+	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true, "user:anna observe device/dev-1": true}}
 	settings := Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}, AllowedDevices: []string{"dev-1"}}
 	m, h := newModule(t, settings, access)
 	m.files = copiesOf(usbPrinter())

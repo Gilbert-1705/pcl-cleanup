@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/prusa3d/prusa-connect/sdk/accessapi"
 	"github.com/prusa3d/prusa-connect/sdk/deviceapi"
@@ -48,7 +46,24 @@ func call(t *testing.T, h http.Handler, principal, method, target, body string) 
 
 	path, query, _ := strings.Cut(target, "?")
 
-	r, err := routesapi.Request{Method: method, Path: path, Query: query, Body: []byte(body), Principal: principal}.HTTP(context.Background())
+	headers := map[string][]string{}
+	if method != http.MethodGet {
+		headers["Content-Type"] = []string{"application/json"}
+	}
+
+	// A save names the list it was made on, as the page does.
+	if method == http.MethodPut && path == "/rules" {
+		headers["If-Match"] = []string{`"` + versionFor(t, h, principal) + `"`}
+	}
+
+	return send(t, h, routesapi.Request{Method: method, Path: path, Query: query, Body: []byte(body), Principal: principal, Headers: headers})
+}
+
+// send hands one request to the module's routes as the host does.
+func send(t *testing.T, h http.Handler, req routesapi.Request) *httptest.ResponseRecorder {
+	t.Helper()
+
+	r, err := req.HTTP(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,6 +72,20 @@ func call(t *testing.T, h http.Handler, principal, method, target, body string) 
 	h.ServeHTTP(rec, r)
 
 	return rec
+}
+
+// versionFor is the rules_version the overview gives principal.
+func versionFor(t *testing.T, h http.Handler, principal string) string {
+	t.Helper()
+
+	rec := send(t, h, routesapi.Request{Method: http.MethodGet, Path: "/overview", Principal: principal})
+
+	var state State
+	if err := json.Unmarshal(rec.Body.Bytes(), &state); err != nil {
+		t.Fatalf("overview: %v %s", err, rec.Body)
+	}
+
+	return state.RulesVersion
 }
 
 const snapshotRule = `{"id":"s","name":"Snapshots","enabled":true,"storage":"local","path":"camera","mode":"files","pattern":"*.jpg","keep_days":14}`
@@ -143,88 +172,14 @@ func TestTheOperatorsListIsTheOuterLimit(t *testing.T) {
 	}
 }
 
-func TestTheAutomaticRunDeletesOnlyForAnAuthorWhoStillMay(t *testing.T) {
-	var deleted []string
-
-	var mu sync.Mutex
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var body struct{ Paths []string }
-		_ = json.NewDecoder(r.Body).Decode(&body)
-
-		mu.Lock()
-		deleted = append(deleted, body.Paths...)
-		mu.Unlock()
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	access := &fakeAccess{allow: map[string]bool{"user:anna write_storage resource_kind/storage": true}}
-	settings := Settings{AutoInterval: "6h", APIToken: "pcl_x", CoreURL: server.URL, AllowedStorages: []string{"local"}}
-
-	if err := settings.check(); err != nil {
-		t.Fatal(err)
-	}
-
-	m, h := newModule(t, settings, access)
-
-	// The defaults have no author: nothing runs, and the page is told why.
-	m.runAll(context.Background(), "automatisch")
-
-	if len(deleted) != 0 || len(m.skipped) != 2 {
-		t.Fatalf("defaults ran: %d deleted, skipped %v", len(deleted), m.skipped)
-	}
-
-	if rec := call(t, h, "user:anna", "PUT", "/rules", "["+snapshotRule+"]"); rec.Code != http.StatusOK {
-		t.Fatalf("%d %s", rec.Code, rec.Body)
-	}
-
-	m.runAll(context.Background(), "automatisch")
-
-	// The run plans with the real clock, the fixture is dated by now, so count
-	// what a plan right now would delete.
-	rules, _ := m.rules.load()
-	want := planRule(context.Background(), storageWith(), rules[0], "", time.Now()).DeleteUnits
-
-	if want < 15 || len(deleted) != want || len(m.skipped) != 0 {
-		t.Fatalf("anna's rule: %d deleted, want %d, skipped %v", len(deleted), want, m.skipped)
-	}
-
-	for _, p := range deleted {
-		if !strings.HasPrefix(p, "camera/") || !strings.HasSuffix(p, ".jpg") {
-			t.Fatalf("deleted %s", p)
-		}
-	}
-
-	// Anna loses the right: the rule is skipped, nothing more is deleted.
-	access.mu.Lock()
-	access.allow = map[string]bool{}
-	access.mu.Unlock()
-
-	deleted = nil
-	m.runAll(context.Background(), "automatisch")
-
-	if len(deleted) != 0 || !strings.Contains(m.skipped["s"], "may not delete") {
-		t.Fatalf("after anna lost the right: %d deleted, skipped %v", len(deleted), m.skipped)
-	}
-
-	// The server cannot answer: skipped as well, never deleted.
-	access.fail = errors.New("unreachable")
-	m.runAll(context.Background(), "automatisch")
-
-	if len(deleted) != 0 || m.skipped["s"] == "" {
-		t.Fatalf("with no answer: %d deleted, skipped %v", len(deleted), m.skipped)
-	}
-}
-
 func TestTheHistoryOnlyTakesRunsOfExistingRules(t *testing.T) {
 	access := &fakeAccess{}
 	_, h := newModule(t, Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}}, access)
 
 	for body, want := range map[string]int{
-		`{"rule":"Kamera-Snapshots","units":3,"files":3,"freed":3000}`: http.StatusCreated,
+		`{"rule":"Camera snapshots","units":3,"files":3,"freed":3000}`: http.StatusCreated,
 		`{"rule":"Erfunden","units":3}`:                                http.StatusUnprocessableEntity,
-		`{"rule":"Kamera-Snapshots","units":-1}`:                       http.StatusUnprocessableEntity,
+		`{"rule":"Camera snapshots","units":-1}`:                       http.StatusUnprocessableEntity,
 		`{"rule":""}`:                                                  http.StatusUnprocessableEntity,
 	} {
 		if rec := call(t, h, "user:anna", "POST", "/runs", body); rec.Code != want {
@@ -432,7 +387,12 @@ func TestPrinterRulesAreNarrow(t *testing.T) {
 }
 
 func TestAPrinterRuleNeedsOperateOnThatPrinterAndIsNeverAutomatic(t *testing.T) {
-	access := &fakeAccess{allow: map[string]bool{"user:anna operate device/dev-1": true}}
+	// anna may also delete in the storages: saving only the printer rule
+	// removes the default rules.
+	access := &fakeAccess{allow: map[string]bool{
+		"user:anna operate device/dev-1": true, "user:anna write_storage resource_kind/storage": true,
+		"user:anna observe device/dev-1": true,
+	}}
 	settings := Settings{AutoInterval: "0s", AllowedStorages: []string{"local"}, AllowedDevices: []string{"dev-1"}}
 	m, h := newModule(t, settings, access)
 	m.files = copiesOf(fakePrinterOne())
